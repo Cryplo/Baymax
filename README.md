@@ -74,57 +74,57 @@ composio add github
 baymax
 
 # One-off command
-baymax "read my unread emails"
-baymax "what's on my calendar today?"
-baymax "post to X: Hello from Baymax!"
+baymax run "read my unread emails"
+baymax run "what's on my calendar today?"
+baymax run "post to X: Hello from Baymax!"
 ```
 
 ## Usage Examples
 
 ### Email
 ```bash
-baymax "read my unread emails"
-baymax "summarize my inbox"
-baymax "search emails from john@example.com"
+baymax run "read my unread emails"
+baymax run "summarize my inbox"
+baymax run "search emails from john@example.com"
 ```
 
 ### Calendar
 ```bash
-baymax "show my calendar today"
-baymax "what meetings do I have tomorrow?"
-baymax "schedule a meeting with Bob at 3pm on Friday"
+baymax run "show my calendar today"
+baymax run "what meetings do I have tomorrow?"
+baymax run "schedule a meeting with Bob at 3pm on Friday"
 ```
 
 ### Tasks
 ```bash
-baymax "show my tasks"
-baymax "create a task: Buy groceries"
-baymax "mark task 1 as complete"
+baymax run "show my tasks"
+baymax run "create a task: Buy groceries"
+baymax run "mark task 1 as complete"
 ```
 
 ### Social Media
 ```bash
-baymax "post to X: Hello world!"
-baymax "check my Discord messages"
-baymax "show my Reddit notifications"
+baymax run "post to X: Hello world!"
+baymax run "check my Discord messages"
+baymax run "show my Reddit notifications"
 ```
 
 ### GitHub
 ```bash
-baymax "show my GitHub notifications"
-baymax "list my open pull requests"
-baymax "show issues assigned to me"
+baymax run "show my GitHub notifications"
+baymax run "list my open pull requests"
+baymax run "show issues assigned to me"
 ```
 
 ## CLI Commands
 
 ```bash
-baymax                    # Start interactive REPL mode
-baymax "your command"     # One-off command execution
-baymax --setup           # Run the setup wizard
-baymax --version         # Show version
-baymax apps              # List all supported apps
-baymax status            # Check configuration and connections
+baymax                        # Start interactive REPL mode
+baymax run "your command"     # One-off command execution
+baymax --setup                # Run the setup wizard
+baymax --version              # Show version
+baymax apps                   # List all supported apps
+baymax status                 # Check configuration and connections
 ```
 
 ## Configuration
@@ -135,7 +135,7 @@ baymax status            # Check configuration and connections
 |----------|----------|-------------|
 | `COMPOSIO_API_KEY` | Yes | Your Composio API key |
 | `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key |
-| `ANTHROPIC_MODEL` | No | Model name (default: claude-sonnet-4-20250514) |
+| `ANTHROPIC_MODEL` | No | Model name (default: claude-haiku-4-5) |
 
 ### Adding New Integrations
 

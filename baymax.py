@@ -75,6 +75,7 @@ app = typer.Typer(
     help="Baymax - Your Personal AI Command Center",
     add_completion=False,
     no_args_is_help=False,
+    invoke_without_command=True,
 )
 
 # =============================================================================
@@ -88,11 +89,12 @@ class Config:
     # Required
     COMPOSIO_API_KEY: str = os.getenv("COMPOSIO_API_KEY", "")
 
-    # Anthropic API Configuration
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # LLM API Configuration
+    API_KEY: str = os.getenv("API_KEY", "")
+    TARGET_URL: str = os.getenv("TARGET_URL", "")
 
-    # Model configuration (Claude 3.5 Haiku)
-    MODEL_NAME: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    # Model configuration (Claude 4.5 Haiku)
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-haiku-4-5")
 
     # Composio apps to load (easily extensible)
     COMPOSIO_APPS: List[str] = [
@@ -134,8 +136,11 @@ Remember: You are here to help manage the user's digital life efficiently."""
         if not cls.COMPOSIO_API_KEY:
             missing.append("COMPOSIO_API_KEY")
 
-        if not cls.ANTHROPIC_API_KEY:
-            missing.append("ANTHROPIC_API_KEY")
+        if not cls.API_KEY:
+            missing.append("API_KEY")
+
+        if not cls.TARGET_URL:
+            missing.append("TARGET_URL")
 
         return len(missing) == 0, missing
 
@@ -149,7 +154,7 @@ class ToolLoader:
     """Dynamic tool loader for Composio integrations."""
 
     def __init__(self):
-        self._toolset = None
+        self._client = None
         self._tools = None
 
     def load_tools(self, apps: Optional[List[str]] = None) -> List[Any]:
@@ -158,24 +163,31 @@ class ToolLoader:
             return self._tools
 
         try:
-            from composio_langchain import ComposioToolSet, App, Action
+            from composio import Composio
+            from composio_langchain import LangchainProvider
 
-            self._toolset = ComposioToolSet(api_key=Config.COMPOSIO_API_KEY)
+            # Initialize Composio client with Langchain provider
+            self._client = Composio(
+                provider=LangchainProvider(),
+                api_key=Config.COMPOSIO_API_KEY,
+            )
 
             apps_to_load = apps or Config.COMPOSIO_APPS
 
-            # Load tools for each app
-            all_tools = []
-            for app_name in apps_to_load:
-                try:
-                    app_enum = getattr(App, app_name, None)
-                    if app_enum:
-                        tools = self._toolset.get_tools(apps=[app_enum])
-                        all_tools.extend(tools)
-                except Exception as e:
-                    console.print(f"[warning]Could not load {app_name}: {e}[/warning]")
+            # Convert app names to lowercase for the API
+            toolkits = [app.lower() for app in apps_to_load]
 
-            self._tools = all_tools
+            # Load tools for all apps at once
+            try:
+                tools = self._client.tools.get(
+                    user_id="default",
+                    toolkits=toolkits,
+                )
+                self._tools = list(tools) if tools else []
+            except Exception as e:
+                console.print(f"[warning]Could not load tools: {e}[/warning]")
+                self._tools = []
+
             return self._tools
 
         except ImportError:
@@ -188,8 +200,8 @@ class ToolLoader:
             return []
 
     @property
-    def toolset(self):
-        return self._toolset
+    def client(self):
+        return self._client
 
 
 tool_loader = ToolLoader()
@@ -232,8 +244,7 @@ def get_llm():
 def create_agent():
     """Create the Baymax agent with tools."""
     try:
-        from langchain.agents import create_tool_calling_agent, AgentExecutor
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from langchain.agents import create_agent
 
         # Load LLM
         llm = get_llm()
@@ -252,31 +263,18 @@ def create_agent():
             console.print("[warning]No tools loaded. Some features may not work.[/warning]")
             console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
 
-        # Create prompt
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", Config.SYSTEM_PROMPT),
-                MessagesPlaceholder(variable_name="chat_history", optional=True),
-                ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-
-        # Create agent
+        # Create agent using the new LangChain API
         if tools:
-            agent = create_tool_calling_agent(llm, tools, prompt)
-            agent_executor = AgentExecutor(
-                agent=agent,
+            agent = create_agent(
+                model=llm,
                 tools=tools,
-                verbose=False,
-                handle_parsing_errors=True,
-                max_iterations=10,
+                system_prompt=Config.SYSTEM_PROMPT,
             )
         else:
             # Fallback to simple LLM if no tools
-            agent_executor = None
+            agent = None
 
-        return agent_executor, llm, tools
+        return agent, llm, tools
 
     except Exception as e:
         console.print(f"[error]Failed to create agent: {e}[/error]")
@@ -288,7 +286,7 @@ def create_agent():
 # =============================================================================
 
 
-def process_command(command: str, agent_executor, llm, chat_history: List = None) -> str:
+def process_command(command: str, agent, llm, chat_history: List = None) -> str:
     """Process a natural language command and return the response."""
     chat_history = chat_history or []
 
@@ -301,14 +299,35 @@ def process_command(command: str, agent_executor, llm, chat_history: List = None
         ) as progress:
             progress.add_task("Thinking...", total=None)
 
-            if agent_executor:
-                result = agent_executor.invoke(
-                    {
-                        "input": command,
-                        "chat_history": chat_history,
-                    }
-                )
-                return result.get("output", "I processed your request but have no response.")
+            if agent:
+                # Use the new LangChain agent API
+                # The agent is a compiled graph, invoke it with messages
+                from langchain_core.messages import HumanMessage
+
+                # Build messages from chat history and new command
+                messages = list(chat_history) + [HumanMessage(content=command)]
+
+                # Invoke the agent
+                result = agent.invoke({"messages": messages})
+
+                # Extract the response from the result
+                if hasattr(result, "messages") and result.messages:
+                    last_message = result.messages[-1]
+                    return (
+                        last_message.content
+                        if hasattr(last_message, "content")
+                        else str(last_message)
+                    )
+                elif isinstance(result, dict) and "messages" in result:
+                    messages = result["messages"]
+                    if messages:
+                        last_message = messages[-1]
+                        return (
+                            last_message.content
+                            if hasattr(last_message, "content")
+                            else str(last_message)
+                        )
+                return "I processed your request but have no response."
             else:
                 # Fallback to simple LLM
                 response = llm.invoke(command)
@@ -379,14 +398,18 @@ def run_setup():
         )
     )
 
-    # Check for Anthropic API key
-    if not Config.ANTHROPIC_API_KEY:
-        console.print("\n[error]ANTHROPIC_API_KEY not found![/error]")
-        console.print("\n[info]To get your Anthropic API key:[/info]")
-        console.print("1. Go to https://console.anthropic.com")
-        console.print("2. Sign up or log in")
-        console.print("3. Create an API key")
-        console.print("4. Add it to your .env file: ANTHROPIC_API_KEY=your_key_here")
+    # Check for API key
+    if not Config.API_KEY:
+        console.print("\n[error]API_KEY not found![/error]")
+        console.print("\n[info]Add your API key to .env:[/info]")
+        console.print("  API_KEY=your_api_key_here")
+        console.print("")
+
+    # Check for Target URL
+    if not Config.TARGET_URL:
+        console.print("\n[error]TARGET_URL not found![/error]")
+        console.print("\n[info]Add your API endpoint to .env:[/info]")
+        console.print("  TARGET_URL=your_api_endpoint_here")
         console.print("")
 
     # Check for Composio API key
@@ -400,9 +423,13 @@ def run_setup():
         return
 
     try:
-        from composio import ComposioToolSet, App
+        from composio import Composio
+        from composio_langchain import LangchainProvider
 
-        toolset = ComposioToolSet(api_key=Config.COMPOSIO_API_KEY)
+        client = Composio(
+            provider=LangchainProvider(),
+            api_key=Config.COMPOSIO_API_KEY,
+        )
 
         console.print("\n[success]Composio API key found![/success]\n")
 
@@ -423,13 +450,14 @@ def run_setup():
         # Check connected apps
         console.print("\n[info]Checking connected apps...[/info]")
         try:
-            entity = toolset.get_entity()
-            connections = entity.get_connections()
+            response = client.connected_accounts.list(user_ids=["default"])
+            items = getattr(response, "items", []) or []
 
-            if connections:
+            if items:
                 console.print("\n[success]Connected apps:[/success]")
-                for conn in connections:
-                    console.print(f"  - {conn.appUniqueId}")
+                for conn in items:
+                    toolkit = getattr(conn, "toolkit", None) or getattr(conn, "app_name", "Unknown")
+                    console.print(f"  - {toolkit}")
             else:
                 console.print("\n[warning]No apps connected yet.[/warning]")
                 console.print("Run 'composio add <app_name>' to connect your first app!")
@@ -451,12 +479,9 @@ def run_setup():
 # =============================================================================
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
-    command: Optional[str] = typer.Argument(
-        None,
-        help="Natural language command to execute (omit for interactive mode)",
-    ),
+    ctx: typer.Context,
     setup: bool = typer.Option(
         False,
         "--setup",
@@ -473,11 +498,11 @@ def main(
     """
     Baymax - Your Personal AI Command Center
 
-    Run without arguments for interactive REPL mode, or pass a command directly.
+    Run without arguments for interactive REPL mode, or use subcommands.
 
     Examples:
         baymax                           # Interactive mode
-        baymax "read my unread emails"   # One-off command
+        baymax run "read my emails"      # One-off command
         baymax --setup                   # Setup wizard
     """
     # Version
@@ -492,6 +517,16 @@ def main(
         run_setup()
         raise typer.Exit(0)
 
+    # If a subcommand is being invoked, don't run the main logic
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Start interactive REPL mode
+    start_repl()
+
+
+def start_repl():
+    """Start the interactive REPL mode."""
     # Validate configuration
     valid, missing = Config.validate()
     if not valid:
@@ -504,16 +539,10 @@ def main(
 
     # Create agent
     try:
-        agent_executor, llm, tools = create_agent()
+        agent, llm, tools = create_agent()
     except Exception as e:
         console.print(f"[error]Failed to initialize: {e}[/error]")
         raise typer.Exit(1)
-
-    # One-off command mode
-    if command:
-        response = process_command(command, agent_executor, llm)
-        display_response(response)
-        raise typer.Exit(0)
 
     # Interactive REPL mode
     display_welcome()
@@ -541,7 +570,7 @@ def main(
                 continue
 
             # Process the command
-            response = process_command(user_input, agent_executor, llm, chat_history)
+            response = process_command(user_input, agent, llm, chat_history)
 
             # Display response
             console.print(f"\n[baymax]Baymax:[/baymax]")
@@ -568,6 +597,33 @@ def main(
 # =============================================================================
 
 
+@app.command("run")
+def run_command(
+    command: str = typer.Argument(..., help="Natural language command to execute"),
+):
+    """Execute a one-off natural language command."""
+    # Validate configuration
+    valid, missing = Config.validate()
+    if not valid:
+        console.print("[error]Missing required configuration:[/error]")
+        for item in missing:
+            console.print(f"  - {item}")
+        console.print("\n[info]Please add these to your .env file.[/info]")
+        console.print("Run 'baymax --setup' for help.")
+        raise typer.Exit(1)
+
+    # Create agent
+    try:
+        agent, llm, tools = create_agent()
+    except Exception as e:
+        console.print(f"[error]Failed to initialize: {e}[/error]")
+        raise typer.Exit(1)
+
+    # Process the command
+    response = process_command(command, agent, llm)
+    display_response(response)
+
+
 @app.command("apps")
 def list_apps():
     """List all supported Composio apps."""
@@ -590,7 +646,10 @@ def status():
         f"  COMPOSIO_API_KEY: {'[success]Set[/success]' if Config.COMPOSIO_API_KEY else '[error]Missing[/error]'}"
     )
     console.print(
-        f"  ANTHROPIC_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_API_KEY else '[error]Missing[/error]'}"
+        f"  API_KEY: {'[success]Set[/success]' if Config.API_KEY else '[error]Missing[/error]'}"
+    )
+    console.print(
+        f"  TARGET_URL: {'[success]Set[/success]' if Config.TARGET_URL else '[error]Missing[/error]'}"
     )
     console.print(f"  Model: {Config.MODEL_NAME}")
 
@@ -602,16 +661,21 @@ def status():
     # Check Composio connections
     if Config.COMPOSIO_API_KEY:
         try:
-            from composio import ComposioToolSet
+            from composio import Composio
+            from composio_langchain import LangchainProvider
 
-            toolset = ComposioToolSet(api_key=Config.COMPOSIO_API_KEY)
-            entity = toolset.get_entity()
-            connections = entity.get_connections()
+            client = Composio(
+                provider=LangchainProvider(),
+                api_key=Config.COMPOSIO_API_KEY,
+            )
+            response = client.connected_accounts.list(user_ids=["default"])
+            items = getattr(response, "items", []) or []
 
             console.print("\n[info]Connected Apps:[/info]")
-            if connections:
-                for conn in connections:
-                    console.print(f"  [success]✓[/success] {conn.appUniqueId}")
+            if items:
+                for conn in items:
+                    toolkit = getattr(conn, "toolkit", None) or getattr(conn, "app_name", "Unknown")
+                    console.print(f"  [success]✓[/success] {toolkit}")
             else:
                 console.print("  [warning]No apps connected[/warning]")
 
