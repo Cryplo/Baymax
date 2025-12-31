@@ -52,8 +52,7 @@ cp .env.example .env
 
 Required environment variables:
 - `COMPOSIO_API_KEY` - Get from [Composio](https://app.composio.dev)
-- `AZURE_OPENAI_API_KEY` - Your Azure OpenAI API key
-- `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI endpoint
+- `ANTHROPIC_API_KEY` - Get from [Anthropic Console](https://console.anthropic.com)
 
 ### 4. Connect Your Accounts
 
@@ -135,10 +134,8 @@ baymax status            # Check configuration and connections
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `COMPOSIO_API_KEY` | Yes | Your Composio API key |
-| `AZURE_OPENAI_API_KEY` | Yes | Azure OpenAI API key |
-| `AZURE_OPENAI_ENDPOINT` | Yes | Azure OpenAI endpoint URL |
-| `AZURE_OPENAI_API_VERSION` | No | API version (default: 2024-10-21) |
-| `AZURE_DEPLOYMENT_NAME` | No | Model deployment name (default: claude-3-5-haiku) |
+| `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key |
+| `ANTHROPIC_MODEL` | No | Model name (default: claude-sonnet-4-20250514) |
 
 ### Adding New Integrations
 

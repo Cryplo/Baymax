@@ -12,12 +12,11 @@ SETUP INSTRUCTIONS
    pip install -e .
 
    Or manually:
-   pip install typer rich python-dotenv langchain langchain-openai composio-langchain
+   pip install typer rich python-dotenv langchain langchain-anthropic composio-langchain
 
 2. Create a .env file with your API keys:
    COMPOSIO_API_KEY=your_composio_api_key
-   AZURE_OPENAI_API_KEY=your_azure_key
-   AZURE_OPENAI_ENDPOINT=your_azure_endpoint
+   ANTHROPIC_API_KEY=your_anthropic_api_key
 
 3. Run Baymax setup to connect your accounts:
    baymax --setup
@@ -89,11 +88,11 @@ class Config:
     # Required
     COMPOSIO_API_KEY: str = os.getenv("COMPOSIO_API_KEY", "")
 
-    # Azure OpenAI Configuration (for Anthropic models via Azure Foundry)
-    AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")
-    AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-    AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
-    AZURE_DEPLOYMENT_NAME: str = os.getenv("AZURE_DEPLOYMENT_NAME", "claude-3-5-haiku")
+    # Anthropic API Configuration
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+    # Model configuration (Claude 3.5 Haiku)
+    MODEL_NAME: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 
     # Composio apps to load (easily extensible)
     COMPOSIO_APPS: List[str] = [
@@ -135,11 +134,8 @@ Remember: You are here to help manage the user's digital life efficiently."""
         if not cls.COMPOSIO_API_KEY:
             missing.append("COMPOSIO_API_KEY")
 
-        if not cls.AZURE_OPENAI_API_KEY:
-            missing.append("AZURE_OPENAI_API_KEY")
-
-        if not cls.AZURE_OPENAI_ENDPOINT:
-            missing.append("AZURE_OPENAI_ENDPOINT")
+        if not cls.ANTHROPIC_API_KEY:
+            missing.append("ANTHROPIC_API_KEY")
 
         return len(missing) == 0, missing
 
@@ -205,23 +201,21 @@ tool_loader = ToolLoader()
 
 
 def get_llm():
-    """Get the configured LLM (Azure OpenAI with Anthropic models)."""
+    """Get the configured LLM (Anthropic Claude 3.5 Haiku)."""
     try:
-        from langchain_openai import AzureChatOpenAI
+        from langchain_anthropic import ChatAnthropic
 
-        llm = AzureChatOpenAI(
-            azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
-            azure_deployment=Config.AZURE_DEPLOYMENT_NAME,
-            api_key=Config.AZURE_OPENAI_API_KEY,
-            api_version=Config.AZURE_OPENAI_API_VERSION,
-            temperature=0.7,
+        llm = ChatAnthropic(
+            model=Config.MODEL_NAME,
+            api_key=Config.ANTHROPIC_API_KEY,
+            temperature=0,
             max_tokens=2048,
         )
         return llm
 
     except ImportError:
         console.print(
-            "[error]langchain-openai not installed. Run: pip install langchain-openai[/error]"
+            "[error]langchain-anthropic not installed. Run: pip install langchain-anthropic[/error]"
         )
         raise typer.Exit(1)
     except Exception as e:
@@ -254,9 +248,7 @@ def create_agent():
             tools = tool_loader.load_tools()
 
         if not tools:
-            console.print(
-                "[warning]No tools loaded. Some features may not work.[/warning]"
-            )
+            console.print("[warning]No tools loaded. Some features may not work.[/warning]")
             console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
 
         # Create prompt
@@ -295,9 +287,7 @@ def create_agent():
 # =============================================================================
 
 
-def process_command(
-    command: str, agent_executor, llm, chat_history: List = None
-) -> str:
+def process_command(command: str, agent_executor, llm, chat_history: List = None) -> str:
     """Process a natural language command and return the response."""
     chat_history = chat_history or []
 
@@ -317,9 +307,7 @@ def process_command(
                         "chat_history": chat_history,
                     }
                 )
-                return result.get(
-                    "output", "I processed your request but have no response."
-                )
+                return result.get("output", "I processed your request but have no response.")
             else:
                 # Fallback to simple LLM
                 response = llm.invoke(command)
@@ -390,6 +378,16 @@ def run_setup():
         )
     )
 
+    # Check for Anthropic API key
+    if not Config.ANTHROPIC_API_KEY:
+        console.print("\n[error]ANTHROPIC_API_KEY not found![/error]")
+        console.print("\n[info]To get your Anthropic API key:[/info]")
+        console.print("1. Go to https://console.anthropic.com")
+        console.print("2. Sign up or log in")
+        console.print("3. Create an API key")
+        console.print("4. Add it to your .env file: ANTHROPIC_API_KEY=your_key_here")
+        console.print("")
+
     # Check for Composio API key
     if not Config.COMPOSIO_API_KEY:
         console.print("\n[error]COMPOSIO_API_KEY not found![/error]")
@@ -433,9 +431,7 @@ def run_setup():
                     console.print(f"  - {conn.appUniqueId}")
             else:
                 console.print("\n[warning]No apps connected yet.[/warning]")
-                console.print(
-                    "Run 'composio add <app_name>' to connect your first app!"
-                )
+                console.print("Run 'composio add <app_name>' to connect your first app!")
 
         except Exception as e:
             console.print(f"\n[warning]Could not check connections: {e}[/warning]")
@@ -444,9 +440,7 @@ def run_setup():
         console.print("Run 'baymax' to start the interactive mode.")
 
     except ImportError:
-        console.print(
-            "[error]Composio not installed. Run: pip install composio-langchain[/error]"
-        )
+        console.print("[error]Composio not installed. Run: pip install composio-langchain[/error]")
     except Exception as e:
         console.print(f"[error]Setup error: {e}[/error]")
 
@@ -488,6 +482,7 @@ def main(
     # Version
     if version:
         console.print("[baymax]Baymax[/baymax] v1.0.0")
+        console.print(f"Using model: {Config.MODEL_NAME}")
         console.print("Your calm, efficient personal AI assistant.")
         raise typer.Exit(0)
 
@@ -560,14 +555,10 @@ def main(
                 chat_history = chat_history[-20:]
 
         except KeyboardInterrupt:
-            console.print(
-                "\n\n[baymax]Baymax:[/baymax] Goodbye! Take care of yourself."
-            )
+            console.print("\n\n[baymax]Baymax:[/baymax] Goodbye! Take care of yourself.")
             break
         except EOFError:
-            console.print(
-                "\n\n[baymax]Baymax:[/baymax] Goodbye! Take care of yourself."
-            )
+            console.print("\n\n[baymax]Baymax:[/baymax] Goodbye! Take care of yourself.")
             break
 
 
@@ -598,19 +589,14 @@ def status():
         f"  COMPOSIO_API_KEY: {'[success]Set[/success]' if Config.COMPOSIO_API_KEY else '[error]Missing[/error]'}"
     )
     console.print(
-        f"  AZURE_OPENAI_API_KEY: {'[success]Set[/success]' if Config.AZURE_OPENAI_API_KEY else '[error]Missing[/error]'}"
+        f"  ANTHROPIC_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_API_KEY else '[error]Missing[/error]'}"
     )
-    console.print(
-        f"  AZURE_OPENAI_ENDPOINT: {'[success]Set[/success]' if Config.AZURE_OPENAI_ENDPOINT else '[error]Missing[/error]'}"
-    )
-    console.print(f"  AZURE_DEPLOYMENT_NAME: {Config.AZURE_DEPLOYMENT_NAME}")
+    console.print(f"  Model: {Config.MODEL_NAME}")
 
     if valid:
         console.print("\n[success]All required configuration is present![/success]")
     else:
-        console.print(
-            "\n[error]Missing required configuration. Run 'baymax --setup'.[/error]"
-        )
+        console.print("\n[error]Missing required configuration. Run 'baymax --setup'.[/error]")
 
     # Check Composio connections
     if Config.COMPOSIO_API_KEY:
