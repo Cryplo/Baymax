@@ -1,0 +1,17 @@
+# Baymax - Required Dependencies
+# Install with: pip install -r requirements.txt
+
+# CLI Framework
+typer>=0.9.0
+rich>=13.0.0
+
+# Environment Configuration
+python-dotenv>=1.0.0
+
+# LangChain & LLM
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+
+# Composio Tool Integrations
+composio-langchain>=0.5.0

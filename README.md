@@ -13,18 +13,35 @@ A calm, efficient CLI AI agent that acts as a single natural-language command ce
 
 ## Quick Start
 
-### 1. Install
+### 1. Clone & Set Up Virtual Environment
 
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/baymax.git
 cd baymax
 
-# Install in development mode
-pip install -e .
+# Create a virtual environment
+python3 -m venv venv
+
+# Activate the virtual environment
+# On macOS/Linux:
+source venv/bin/activate
+
+# On Windows:
+# venv\Scripts\activate
 ```
 
-### 2. Configure
+### 2. Install Dependencies
+
+```bash
+# Option A: Install with pip (recommended for development)
+pip install -e .
+
+# Option B: Install from requirements.txt
+pip install -r requirements.txt
+```
+
+### 3. Configure
 
 ```bash
 # Copy the example environment file
@@ -38,7 +55,7 @@ Required environment variables:
 - `AZURE_OPENAI_API_KEY` - Your Azure OpenAI API key
 - `AZURE_OPENAI_ENDPOINT` - Your Azure OpenAI endpoint
 
-### 3. Connect Your Accounts
+### 4. Connect Your Accounts
 
 ```bash
 # Run the setup wizard
@@ -51,7 +68,7 @@ composio add github
 # ... etc
 ```
 
-### 4. Start Using Baymax
+### 5. Start Using Baymax
 
 ```bash
 # Interactive mode (REPL)
@@ -175,6 +192,9 @@ If you hit rate limits, wait a moment and try again. Consider upgrading your API
 ## Development
 
 ```bash
+# Make sure venv is activated
+source venv/bin/activate
+
 # Install with dev dependencies
 pip install -e ".[dev]"
 
@@ -186,6 +206,23 @@ ruff check baymax.py
 
 # Type check
 mypy baymax.py
+```
+
+### Virtual Environment Tips
+
+```bash
+# Activate the virtual environment (do this each session)
+source venv/bin/activate    # macOS/Linux
+venv\Scripts\activate       # Windows
+
+# Verify you're in the venv (should show the venv path)
+which python
+
+# Deactivate when done
+deactivate
+
+# Update requirements.txt after adding new packages
+pip freeze > requirements.txt
 ```
 
 ## License
