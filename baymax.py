@@ -207,7 +207,8 @@ def get_llm():
 
         llm = ChatAnthropic(
             model=Config.MODEL_NAME,
-            api_key=Config.ANTHROPIC_API_KEY,
+            base_url=Config.TARGET_URL,
+            api_key=Config.API_KEY,
             temperature=0,
             max_tokens=2048,
         )
