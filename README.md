@@ -57,15 +57,15 @@ Required environment variables:
 ### 4. Connect Your Accounts
 
 ```bash
-# Run the setup wizard
+# Run the setup wizard to check your configuration
 baymax --setup
-
-# Connect individual apps using Composio CLI
-composio add gmail
-composio add googlecalendar
-composio add github
-# ... etc
 ```
+
+Then connect your apps via the Composio web dashboard:
+1. Go to [app.composio.dev/apps](https://app.composio.dev/apps)
+2. Find the app you want to connect (Gmail, Google Calendar, GitHub, etc.)
+3. Click "Connect" and complete the OAuth flow
+4. Your connected accounts will be available to Baymax
 
 ### 5. Start Using Baymax
 

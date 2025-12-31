@@ -438,29 +438,43 @@ def run_setup():
         for i, app in enumerate(Config.COMPOSIO_APPS, 1):
             console.print(f"  {i}. {app}")
 
-        console.print("\n[info]To connect an app, run:[/info]")
-        console.print("  composio add <app_name>")
-        console.print("\n[info]Examples:[/info]")
-        console.print("  composio add gmail")
-        console.print("  composio add googlecalendar")
-        console.print("  composio add github")
-        console.print("  composio add twitter")
-        console.print("  composio add discord")
+        console.print("\n[info]To connect an app:[/info]")
+        console.print("  1. Go to https://app.composio.dev/apps")
+        console.print("  2. Find the app you want to connect (e.g., Gmail, Google Calendar)")
+        console.print("  3. Click 'Connect' and follow the OAuth flow")
+        console.print("  4. Your connected accounts will appear in your dashboard")
 
         # Check connected apps
         console.print("\n[info]Checking connected apps...[/info]")
         try:
-            response = client.connected_accounts.list(user_ids=["default"])
-            items = getattr(response, "items", []) or []
+            # Fetch all pages of connected accounts
+            all_items = []
+            response = client.connected_accounts.list()
+            all_items.extend(getattr(response, "items", []) or [])
 
-            if items:
+            # Paginate through all results
+            while getattr(response, "next_cursor", None):
+                response = client.connected_accounts.list(cursor=response.next_cursor)
+                all_items.extend(getattr(response, "items", []) or [])
+
+            # Filter to only ACTIVE connections and get unique toolkits
+            active_toolkits = set()
+            for conn in all_items:
+                status = getattr(conn, "status", None)
+                if status == "ACTIVE":
+                    toolkit = getattr(conn, "toolkit", None)
+                    if toolkit:
+                        # toolkit is an object with a 'slug' attribute
+                        slug = getattr(toolkit, "slug", None) or str(toolkit)
+                        active_toolkits.add(slug)
+
+            if active_toolkits:
                 console.print("\n[success]Connected apps:[/success]")
-                for conn in items:
-                    toolkit = getattr(conn, "toolkit", None) or getattr(conn, "app_name", "Unknown")
-                    console.print(f"  - {toolkit}")
+                for toolkit in sorted(active_toolkits):
+                    console.print(f"  [success]✓[/success] {toolkit}")
             else:
                 console.print("\n[warning]No apps connected yet.[/warning]")
-                console.print("Run 'composio add <app_name>' to connect your first app!")
+                console.print("Visit https://app.composio.dev/apps to connect your first app!")
 
         except Exception as e:
             console.print(f"\n[warning]Could not check connections: {e}[/warning]")
@@ -630,7 +644,7 @@ def list_apps():
     console.print("\n[info]Supported Composio Apps:[/info]\n")
     for app in Config.COMPOSIO_APPS:
         console.print(f"  - {app}")
-    console.print("\n[info]To connect an app, run: composio add <app_name>[/info]")
+    console.print("\n[info]Connect apps at: https://app.composio.dev/apps[/info]")
 
 
 @app.command("status")
@@ -668,13 +682,29 @@ def status():
                 provider=LangchainProvider(),
                 api_key=Config.COMPOSIO_API_KEY,
             )
-            response = client.connected_accounts.list(user_ids=["default"])
-            items = getattr(response, "items", []) or []
+
+            # Fetch all pages of connected accounts
+            all_items = []
+            response = client.connected_accounts.list()
+            all_items.extend(getattr(response, "items", []) or [])
+
+            while getattr(response, "next_cursor", None):
+                response = client.connected_accounts.list(cursor=response.next_cursor)
+                all_items.extend(getattr(response, "items", []) or [])
+
+            # Filter to only ACTIVE connections and get unique toolkits
+            active_toolkits = set()
+            for conn in all_items:
+                status = getattr(conn, "status", None)
+                if status == "ACTIVE":
+                    toolkit = getattr(conn, "toolkit", None)
+                    if toolkit:
+                        slug = getattr(toolkit, "slug", None) or str(toolkit)
+                        active_toolkits.add(slug)
 
             console.print("\n[info]Connected Apps:[/info]")
-            if items:
-                for conn in items:
-                    toolkit = getattr(conn, "toolkit", None) or getattr(conn, "app_name", "Unknown")
+            if active_toolkits:
+                for toolkit in sorted(active_toolkits):
                     console.print(f"  [success]✓[/success] {toolkit}")
             else:
                 console.print("  [warning]No apps connected[/warning]")
