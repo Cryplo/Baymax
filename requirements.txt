@@ -14,4 +14,6 @@ langchain-anthropic>=0.1.0
 langchain-core>=0.2.0
 
 # Composio Tool Integrations
-composio-langchain>=0.5.0
+composio>=0.10.0
+composio-langchain>=0.10.0
+composio-core>=0.7.0
