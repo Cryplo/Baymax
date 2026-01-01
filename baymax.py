@@ -94,7 +94,7 @@ class Config:
     TARGET_URL: str = os.getenv("TARGET_URL", "")
 
     # Model configuration (Claude 4.5 Haiku)
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-haiku-4-5")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-sonnet-4-5")
 
     # Composio apps to load (easily extensible)
     COMPOSIO_APPS: List[str] = [

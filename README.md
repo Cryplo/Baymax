@@ -135,7 +135,7 @@ baymax status                 # Check configuration and connections
 |----------|----------|-------------|
 | `COMPOSIO_API_KEY` | Yes | Your Composio API key |
 | `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key |
-| `ANTHROPIC_MODEL` | No | Model name (default: claude-haiku-4-5) |
+| `ANTHROPIC_MODEL` | No | Model name (default: claude-sonnet-4-5) |
 
 ### Adding New Integrations
 
