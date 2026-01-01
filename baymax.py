@@ -156,19 +156,42 @@ class ToolLoader:
     def __init__(self):
         self._client = None
         self._tools = None
+        self._user_id = None
+
+    def _get_user_id(self) -> str:
+        """Get the user_id from connected accounts."""
+        try:
+            response = self._client.connected_accounts.list()
+            items = getattr(response, "items", [])
+
+            for conn in items:
+                if getattr(conn, "status", None) == "ACTIVE":
+                    user_id = getattr(conn, "user_id", None)
+                    if user_id:
+                        return user_id
+
+            return "default"
+        except Exception:
+            return "default"
 
     def _get_allowed_tools_from_mcp(self) -> List[str]:
         """Get the list of allowed tools from MCP configurations."""
         try:
-            # Get all MCP configs
+            # Get all MCP configs (paginated)
             all_mcps = []
-            response = self._client.mcp.list()
-            all_mcps.extend(response.get("items", []))
+            page_no = 1
 
-            # Handle pagination
-            current_page = response.get("current_page", 1)
-            total_pages = response.get("total_pages", 1)
-            # Note: Pagination would need cursor support, for now use first page
+            while True:
+                response = self._client.mcp.list(page_no=page_no)
+                items = response.get("items", [])
+                all_mcps.extend(items)
+
+                current_page = response.get("current_page", 1)
+                total_pages = response.get("total_pages", 1)
+
+                if current_page >= total_pages:
+                    break
+                page_no += 1
 
             # Extract all allowed tools from MCP configs
             all_allowed_tools = []
@@ -197,6 +220,9 @@ class ToolLoader:
                 api_key=Config.COMPOSIO_API_KEY,
             )
 
+            # Get the correct user_id from connected accounts
+            self._user_id = self._get_user_id()
+
             # Get allowed tools from MCP configurations
             allowed_tools = self._get_allowed_tools_from_mcp()
 
@@ -208,7 +234,7 @@ class ToolLoader:
                 # Load only the specific tools configured in MCPs
                 try:
                     tools = self._client.tools.get(
-                        user_id="default",
+                        user_id=self._user_id,
                         tools=allowed_tools,
                     )
                     self._tools = list(tools) if tools else []
@@ -225,7 +251,7 @@ class ToolLoader:
                 for toolkit in toolkits:
                     try:
                         tools = self._client.tools.get(
-                            user_id="default",
+                            user_id=self._user_id,
                             toolkits=[toolkit],
                         )
                         toolkit_tools = list(tools) if tools else []
