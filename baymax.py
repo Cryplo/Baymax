@@ -156,10 +156,14 @@ class ToolLoader:
     def __init__(self):
         self._client = None
         self._tools = None
-        self._user_id = None
+        # External user ID - this should match your Composio user ID
+        self._user_id = os.getenv("COMPOSIO_USER_ID", "default")
 
-    def _get_user_id(self) -> str:
-        """Get the user_id from connected accounts."""
+    def _get_user_id_from_accounts(self) -> str:
+        """Get the user_id from connected accounts if not set via env."""
+        if self._user_id != "default":
+            return self._user_id
+
         try:
             response = self._client.connected_accounts.list()
             items = getattr(response, "items", [])
@@ -216,12 +220,12 @@ class ToolLoader:
 
             # Initialize Composio client with Langchain provider
             self._client = Composio(
-                provider=LangchainProvider(),
                 api_key=Config.COMPOSIO_API_KEY,
+                provider=LangchainProvider(),
             )
 
-            # Get the correct user_id from connected accounts
-            self._user_id = self._get_user_id()
+            # Get the correct user_id
+            self._user_id = self._get_user_id_from_accounts()
 
             # Get allowed tools from MCP configurations
             allowed_tools = self._get_allowed_tools_from_mcp()
@@ -276,6 +280,10 @@ class ToolLoader:
     def client(self):
         return self._client
 
+    @property
+    def user_id(self):
+        return self._user_id
+
 
 tool_loader = ToolLoader()
 
@@ -314,7 +322,7 @@ def get_llm():
 # =============================================================================
 
 
-def create_agent():
+def create_baymax_agent():
     """Create the Baymax agent with tools."""
     try:
         from langchain.agents import create_agent
@@ -336,12 +344,13 @@ def create_agent():
             console.print("[warning]No tools loaded. Some features may not work.[/warning]")
             console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
 
-        # Create agent using the new LangChain API
+        # Create agent using the LangChain API (matching Composio docs pattern)
         if tools:
             agent = create_agent(
                 model=llm,
                 tools=tools,
                 system_prompt=Config.SYSTEM_PROMPT,
+                name="Baymax Agent",
             )
         else:
             # Fallback to simple LLM if no tools
@@ -373,14 +382,22 @@ def process_command(command: str, agent, llm, chat_history: List = None) -> str:
             progress.add_task("Thinking...", total=None)
 
             if agent:
-                # Use the new LangChain agent API
-                # The agent is a compiled graph, invoke it with messages
-                from langchain_core.messages import HumanMessage
+                # Build messages in the format matching Composio docs
+                # Using plain dicts with role/content instead of LangChain message objects
+                messages = []
 
-                # Build messages from chat history and new command
-                messages = list(chat_history) + [HumanMessage(content=command)]
+                # Add chat history
+                for msg in chat_history:
+                    if hasattr(msg, "type"):
+                        role = "user" if msg.type == "human" else "assistant"
+                        messages.append({"role": role, "content": msg.content})
+                    elif isinstance(msg, dict):
+                        messages.append(msg)
 
-                # Invoke the agent
+                # Add current command
+                messages.append({"role": "user", "content": command})
+
+                # Invoke the agent (matching Composio docs pattern)
                 result = agent.invoke({"messages": messages})
 
                 # Extract the response from the result
@@ -392,9 +409,9 @@ def process_command(command: str, agent, llm, chat_history: List = None) -> str:
                         else str(last_message)
                     )
                 elif isinstance(result, dict) and "messages" in result:
-                    messages = result["messages"]
-                    if messages:
-                        last_message = messages[-1]
+                    msgs = result["messages"]
+                    if msgs:
+                        last_message = msgs[-1]
                         return (
                             last_message.content
                             if hasattr(last_message, "content")
@@ -626,7 +643,7 @@ def start_repl():
 
     # Create agent
     try:
-        agent, llm, tools = create_agent()
+        agent, llm, tools = create_baymax_agent()
     except Exception as e:
         console.print(f"[error]Failed to initialize: {e}[/error]")
         raise typer.Exit(1)
@@ -701,7 +718,7 @@ def run_command(
 
     # Create agent
     try:
-        agent, llm, tools = create_agent()
+        agent, llm, tools = create_baymax_agent()
     except Exception as e:
         console.print(f"[error]Failed to initialize: {e}[/error]")
         raise typer.Exit(1)
