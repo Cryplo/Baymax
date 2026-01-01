@@ -157,8 +157,33 @@ class ToolLoader:
         self._client = None
         self._tools = None
 
+    def _get_allowed_tools_from_mcp(self) -> List[str]:
+        """Get the list of allowed tools from MCP configurations."""
+        try:
+            # Get all MCP configs
+            all_mcps = []
+            response = self._client.mcp.list()
+            all_mcps.extend(response.get("items", []))
+
+            # Handle pagination
+            current_page = response.get("current_page", 1)
+            total_pages = response.get("total_pages", 1)
+            # Note: Pagination would need cursor support, for now use first page
+
+            # Extract all allowed tools from MCP configs
+            all_allowed_tools = []
+            for mcp in all_mcps:
+                tools = getattr(mcp, "allowed_tools", [])
+                all_allowed_tools.extend(tools)
+
+            return list(set(all_allowed_tools))  # Deduplicate
+
+        except Exception as e:
+            console.print(f"[warning]Could not load MCP configs: {e}[/warning]")
+            return []
+
     def load_tools(self, apps: Optional[List[str]] = None) -> List[Any]:
-        """Load tools from Composio for specified apps."""
+        """Load tools from Composio based on MCP configurations."""
         if self._tools is not None:
             return self._tools
 
@@ -172,21 +197,43 @@ class ToolLoader:
                 api_key=Config.COMPOSIO_API_KEY,
             )
 
-            apps_to_load = apps or Config.COMPOSIO_APPS
+            # Get allowed tools from MCP configurations
+            allowed_tools = self._get_allowed_tools_from_mcp()
 
-            # Convert app names to lowercase for the API
-            toolkits = [app.lower() for app in apps_to_load]
-
-            # Load tools for all apps at once
-            try:
-                tools = self._client.tools.get(
-                    user_id="default",
-                    toolkits=toolkits,
+            if allowed_tools:
+                console.print(
+                    f"[info]Loading {len(allowed_tools)} tools from MCP configs...[/info]"
                 )
-                self._tools = list(tools) if tools else []
-            except Exception as e:
-                console.print(f"[warning]Could not load tools: {e}[/warning]")
-                self._tools = []
+
+                # Load only the specific tools configured in MCPs
+                try:
+                    tools = self._client.tools.get(
+                        user_id="default",
+                        tools=allowed_tools,
+                    )
+                    self._tools = list(tools) if tools else []
+                except Exception as e:
+                    console.print(f"[warning]Could not load tools: {e}[/warning]")
+                    self._tools = []
+            else:
+                # Fallback: load tools for each app if no MCP configs found
+                console.print("[info]No MCP configs found, loading default tools...[/info]")
+                apps_to_load = apps or Config.COMPOSIO_APPS
+                toolkits = [app.lower() for app in apps_to_load]
+
+                all_tools = []
+                for toolkit in toolkits:
+                    try:
+                        tools = self._client.tools.get(
+                            user_id="default",
+                            toolkits=[toolkit],
+                        )
+                        toolkit_tools = list(tools) if tools else []
+                        all_tools.extend(toolkit_tools)
+                    except Exception as e:
+                        console.print(f"[warning]Could not load {toolkit} tools: {e}[/warning]")
+
+                self._tools = all_tools
 
             return self._tools
 
