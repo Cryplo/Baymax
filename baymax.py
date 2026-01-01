@@ -12,11 +12,19 @@ SETUP INSTRUCTIONS
    pip install -e .
 
    Or manually:
-   pip install typer rich python-dotenv langchain langchain-anthropic composio-langchain
+   pip install typer rich python-dotenv anthropic composio
 
 2. Create a .env file with your API keys:
-   COMPOSIO_API_KEY=your_composio_api_key
-   ANTHROPIC_API_KEY=your_anthropic_api_key
+
+   For direct Anthropic API:
+     ANTHROPIC_API_KEY=your_api_key
+     COMPOSIO_API_KEY=your_composio_api_key
+
+   For Azure AI Foundry:
+     USE_FOUNDRY=1
+     ANTHROPIC_FOUNDRY_API_KEY=your_foundry_api_key
+     ANTHROPIC_FOUNDRY_RESOURCE=your-resource-name
+     COMPOSIO_API_KEY=your_composio_api_key
 
 3. Run Baymax setup to connect your accounts:
    baymax --setup
@@ -42,8 +50,8 @@ License: MIT
 
 import os
 import sys
-from typing import Optional, List, Any
-from enum import Enum
+import json
+from typing import Optional, List, Any, Dict
 
 import typer
 from rich.console import Console
@@ -89,12 +97,21 @@ class Config:
     # Required
     COMPOSIO_API_KEY: str = os.getenv("COMPOSIO_API_KEY", "")
 
-    # LLM API Configuration
-    API_KEY: str = os.getenv("API_KEY", "")
-    TARGET_URL: str = os.getenv("TARGET_URL", "")
+    # Anthropic direct API key (mutually exclusive with Foundry)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
-    # Model configuration (Claude 4.5 Haiku)
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-sonnet-4-5")
+    # Azure AI Foundry configuration
+    # Set USE_FOUNDRY=1 to use Azure AI Foundry instead of direct Anthropic
+    USE_FOUNDRY: bool = os.getenv("USE_FOUNDRY", "0") == "1"
+
+    # Foundry credentials (only used when USE_FOUNDRY=1)
+    # API key for Foundry
+    ANTHROPIC_FOUNDRY_API_KEY: str = os.getenv("ANTHROPIC_FOUNDRY_API_KEY", "")
+    # Resource name (e.g., "my-resource" -> https://my-resource.services.ai.azure.com/anthropic/)
+    ANTHROPIC_FOUNDRY_RESOURCE: str = os.getenv("ANTHROPIC_FOUNDRY_RESOURCE", "")
+
+    # Model configuration
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-sonnet-4-5-20250929")
 
     # Composio apps to load (easily extensible)
     COMPOSIO_APPS: List[str] = [
@@ -136,11 +153,16 @@ Remember: You are here to help manage the user's digital life efficiently."""
         if not cls.COMPOSIO_API_KEY:
             missing.append("COMPOSIO_API_KEY")
 
-        if not cls.API_KEY:
-            missing.append("API_KEY")
-
-        if not cls.TARGET_URL:
-            missing.append("TARGET_URL")
+        if cls.USE_FOUNDRY:
+            # Foundry mode - need Foundry API key and resource
+            if not cls.ANTHROPIC_FOUNDRY_API_KEY:
+                missing.append("ANTHROPIC_FOUNDRY_API_KEY")
+            if not cls.ANTHROPIC_FOUNDRY_RESOURCE:
+                missing.append("ANTHROPIC_FOUNDRY_RESOURCE")
+        else:
+            # Direct Anthropic mode
+            if not cls.ANTHROPIC_API_KEY:
+                missing.append("ANTHROPIC_API_KEY")
 
         return len(missing) == 0, missing
 
@@ -151,11 +173,15 @@ Remember: You are here to help manage the user's digital life efficiently."""
 
 
 class ToolLoader:
-    """Dynamic tool loader for Composio integrations."""
+    """Dynamic tool loader for Composio integrations.
+
+    Converts Composio tools to Anthropic SDK ToolParam format.
+    """
 
     def __init__(self):
         self._client = None
         self._tools = None
+        self._tool_map: Dict[str, Any] = {}  # Maps tool name to callable
         # External user ID - this should match your Composio user ID
         self._user_id = os.getenv("COMPOSIO_USER_ID", "default")
 
@@ -209,20 +235,62 @@ class ToolLoader:
             console.print(f"[warning]Could not load MCP configs: {e}[/warning]")
             return []
 
-    def load_tools(self, apps: Optional[List[str]] = None) -> List[Any]:
-        """Load tools from Composio based on MCP configurations."""
+    def _sanitize_tool_name(self, name: str) -> str:
+        """Sanitize tool name to match Anthropic's pattern: ^[a-zA-Z0-9_-]{1,128}$"""
+        import re
+
+        # Replace any invalid characters with underscores
+        sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+        # Remove consecutive underscores
+        sanitized = re.sub(r"_+", "_", sanitized)
+
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip("_-")
+
+        # Truncate to 128 characters
+        if len(sanitized) > 128:
+            sanitized = sanitized[:128].rstrip("_-")
+
+        # Ensure it's not empty
+        if not sanitized:
+            sanitized = "tool"
+
+        return sanitized
+
+    def _convert_to_anthropic_tool(self, composio_tool: Any) -> Dict[str, Any]:
+        """Convert a Composio tool to Anthropic ToolParam format."""
+        # Get original tool name
+        original_name = getattr(composio_tool, "name", str(composio_tool))
+
+        # Sanitize tool name to match Anthropic's requirements
+        tool_name = self._sanitize_tool_name(original_name)
+
+        # Get description and truncate if needed (no hard limit but keep reasonable)
+        description = getattr(composio_tool, "description", "")
+        if len(description) > 1024:
+            description = description[:1021] + "..."
+
+        # Composio tools have name, description, and input schema
+        tool_dict = {
+            "name": tool_name,
+            "description": description,
+            "input_schema": getattr(
+                composio_tool, "input_schema", {"type": "object", "properties": {}}
+            ),
+        }
+        return tool_dict
+
+    def load_tools(self, apps: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Load tools from Composio and convert to Anthropic format."""
         if self._tools is not None:
             return self._tools
 
         try:
             from composio import Composio
-            from composio_langchain import LangchainProvider
 
-            # Initialize Composio client with Langchain provider
-            self._client = Composio(
-                api_key=Config.COMPOSIO_API_KEY,
-                provider=LangchainProvider(),
-            )
+            # Initialize Composio client
+            self._client = Composio(api_key=Config.COMPOSIO_API_KEY)
 
             # Get the correct user_id
             self._user_id = self._get_user_id_from_accounts()
@@ -230,28 +298,33 @@ class ToolLoader:
             # Get allowed tools from MCP configurations
             allowed_tools = self._get_allowed_tools_from_mcp()
 
+            anthropic_tools = []
+
             if allowed_tools:
                 console.print(
                     f"[info]Loading {len(allowed_tools)} tools from MCP configs...[/info]"
                 )
 
-                # Load only the specific tools configured in MCPs
                 try:
                     tools = self._client.tools.get(
                         user_id=self._user_id,
                         tools=allowed_tools,
                     )
-                    self._tools = list(tools) if tools else []
+                    composio_tools = list(tools) if tools else []
+
+                    for tool in composio_tools:
+                        anthropic_tool = self._convert_to_anthropic_tool(tool)
+                        anthropic_tools.append(anthropic_tool)
+                        self._tool_map[anthropic_tool["name"]] = tool
+
                 except Exception as e:
                     console.print(f"[warning]Could not load tools: {e}[/warning]")
-                    self._tools = []
             else:
                 # Fallback: load tools for each app if no MCP configs found
                 console.print("[info]No MCP configs found, loading default tools...[/info]")
                 apps_to_load = apps or Config.COMPOSIO_APPS
                 toolkits = [app.lower() for app in apps_to_load]
 
-                all_tools = []
                 for toolkit in toolkits:
                     try:
                         tools = self._client.tools.get(
@@ -259,22 +332,40 @@ class ToolLoader:
                             toolkits=[toolkit],
                         )
                         toolkit_tools = list(tools) if tools else []
-                        all_tools.extend(toolkit_tools)
+
+                        for tool in toolkit_tools:
+                            anthropic_tool = self._convert_to_anthropic_tool(tool)
+                            anthropic_tools.append(anthropic_tool)
+                            self._tool_map[anthropic_tool["name"]] = tool
+
                     except Exception as e:
                         console.print(f"[warning]Could not load {toolkit} tools: {e}[/warning]")
 
-                self._tools = all_tools
-
+            self._tools = anthropic_tools
             return self._tools
 
         except ImportError:
-            console.print(
-                "[error]Composio not installed. Run: pip install composio-langchain[/error]"
-            )
+            console.print("[error]Composio not installed. Run: pip install composio[/error]")
             return []
         except Exception as e:
             console.print(f"[error]Failed to load Composio tools: {e}[/error]")
             return []
+
+    def execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
+        """Execute a tool by name with the given input."""
+        if tool_name not in self._tool_map:
+            return f"Error: Tool '{tool_name}' not found"
+
+        try:
+            tool = self._tool_map[tool_name]
+            # Composio tools are callable
+            result = tool.run(tool_input)
+
+            if isinstance(result, dict):
+                return json.dumps(result, indent=2)
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool '{tool_name}': {e}"
 
     @property
     def client(self):
@@ -284,82 +375,52 @@ class ToolLoader:
     def user_id(self):
         return self._user_id
 
+    @property
+    def tool_map(self):
+        return self._tool_map
+
 
 tool_loader = ToolLoader()
 
 
 # =============================================================================
-# LLM SETUP
+# ANTHROPIC CLIENT SETUP
 # =============================================================================
 
 
-def get_llm():
-    """Get the configured LLM (Anthropic Claude 3.5 Haiku)."""
+def get_anthropic_client():
+    """Get the configured Anthropic client.
+
+    Supports:
+    - Direct Anthropic API (default)
+    - Azure AI Foundry (set USE_FOUNDRY=1)
+    """
     try:
-        from langchain_anthropic import ChatAnthropic
+        if Config.USE_FOUNDRY:
+            # Use Azure AI Foundry client
+            from anthropic import AnthropicFoundry
 
-        llm = ChatAnthropic(
-            model=Config.MODEL_NAME,
-            base_url=Config.TARGET_URL,
-            api_key=Config.API_KEY,
-            temperature=0,
-            max_tokens=2048,
-        )
-        return llm
-
-    except ImportError:
-        console.print(
-            "[error]langchain-anthropic not installed. Run: pip install langchain-anthropic[/error]"
-        )
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[error]Failed to initialize LLM: {e}[/error]")
-        raise typer.Exit(1)
-
-
-# =============================================================================
-# AGENT SETUP
-# =============================================================================
-
-
-def create_baymax_agent():
-    """Create the Baymax agent with tools."""
-    try:
-        from langchain.agents import create_agent
-
-        # Load LLM
-        llm = get_llm()
-
-        # Load Composio tools
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            progress.add_task("Loading tools...", total=None)
-            tools = tool_loader.load_tools()
-
-        if not tools:
-            console.print("[warning]No tools loaded. Some features may not work.[/warning]")
-            console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
-
-        # Create agent using the LangChain API (matching Composio docs pattern)
-        if tools:
-            agent = create_agent(
-                model=llm,
-                tools=tools,
-                system_prompt=Config.SYSTEM_PROMPT,
-                name="Baymax Agent",
+            client = AnthropicFoundry(
+                api_key=Config.ANTHROPIC_FOUNDRY_API_KEY,
+                resource=Config.ANTHROPIC_FOUNDRY_RESOURCE,
+            )
+            console.print(
+                f"[info]Using Azure AI Foundry: {Config.ANTHROPIC_FOUNDRY_RESOURCE}[/info]"
             )
         else:
-            # Fallback to simple LLM if no tools
-            agent = None
+            # Use standard Anthropic client
+            from anthropic import Anthropic
 
-        return agent, llm, tools
+            client = Anthropic(api_key=Config.ANTHROPIC_API_KEY)
 
+        return client
+
+    except ImportError as e:
+        console.print(f"[error]anthropic not installed: {e}[/error]")
+        console.print("[info]Run: pip install anthropic[/info]")
+        raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[error]Failed to create agent: {e}[/error]")
+        console.print(f"[error]Failed to initialize Anthropic client: {e}[/error]")
         raise typer.Exit(1)
 
 
@@ -368,8 +429,13 @@ def create_baymax_agent():
 # =============================================================================
 
 
-def process_command(command: str, agent, llm, chat_history: List = None) -> str:
-    """Process a natural language command and return the response."""
+def process_command(
+    command: str,
+    client,
+    tools: List[Dict[str, Any]],
+    chat_history: List[Dict[str, Any]] = None,
+) -> str:
+    """Process a natural language command using Anthropic SDK with tool use."""
     chat_history = chat_history or []
 
     try:
@@ -381,54 +447,79 @@ def process_command(command: str, agent, llm, chat_history: List = None) -> str:
         ) as progress:
             progress.add_task("Thinking...", total=None)
 
-            if agent:
-                # Build messages in the format matching Composio docs
-                # Using plain dicts with role/content instead of LangChain message objects
-                messages = []
+            # Build messages list
+            messages = chat_history.copy()
+            messages.append({"role": "user", "content": command})
 
-                # Add chat history
-                for msg in chat_history:
-                    if hasattr(msg, "type"):
-                        role = "user" if msg.type == "human" else "assistant"
-                        messages.append({"role": role, "content": msg.content})
-                    elif isinstance(msg, dict):
-                        messages.append(msg)
+            # Initial API call
+            response = client.messages.create(
+                model=Config.MODEL_NAME,
+                max_tokens=2048,
+                system=Config.SYSTEM_PROMPT,
+                tools=tools if tools else None,
+                messages=messages,
+            )
 
-                # Add current command
-                messages.append({"role": "user", "content": command})
+        # Handle tool use loop (agentic behavior)
+        while response.stop_reason == "tool_use":
+            # Extract tool use blocks
+            tool_uses = [block for block in response.content if block.type == "tool_use"]
 
-                # Invoke the agent (matching Composio docs pattern)
-                result = agent.invoke({"messages": messages})
+            # Execute each tool and collect results
+            tool_results = []
+            for tool_use in tool_uses:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                    transient=True,
+                ) as progress:
+                    progress.add_task(f"Running {tool_use.name}...", total=None)
 
-                # Extract the response from the result
-                if hasattr(result, "messages") and result.messages:
-                    last_message = result.messages[-1]
-                    return (
-                        last_message.content
-                        if hasattr(last_message, "content")
-                        else str(last_message)
+                    result = tool_loader.execute_tool(tool_use.name, tool_use.input)
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": result,
+                        }
                     )
-                elif isinstance(result, dict) and "messages" in result:
-                    msgs = result["messages"]
-                    if msgs:
-                        last_message = msgs[-1]
-                        return (
-                            last_message.content
-                            if hasattr(last_message, "content")
-                            else str(last_message)
-                        )
-                return "I processed your request but have no response."
-            else:
-                # Fallback to simple LLM
-                response = llm.invoke(command)
-                return response.content
+
+            # Add assistant response and tool results to messages
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
+
+            # Continue the conversation
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("Thinking...", total=None)
+
+                response = client.messages.create(
+                    model=Config.MODEL_NAME,
+                    max_tokens=2048,
+                    system=Config.SYSTEM_PROMPT,
+                    tools=tools if tools else None,
+                    messages=messages,
+                )
+
+        # Extract final text response
+        text_blocks = [block.text for block in response.content if hasattr(block, "text")]
+        return (
+            "\n".join(text_blocks)
+            if text_blocks
+            else "I processed your request but have no response."
+        )
 
     except Exception as e:
         error_msg = str(e).lower()
 
         # Friendly error messages
         if "authentication" in error_msg or "auth" in error_msg or "401" in error_msg:
-            return "Authentication failed. Please run `baymax --setup` to reconnect your accounts."
+            return "Authentication failed. Please check your API key or Azure credentials."
         elif "rate limit" in error_msg or "429" in error_msg:
             return "Rate limit reached. Please wait a moment and try again."
         elif "network" in error_msg or "connection" in error_msg:
@@ -436,13 +527,13 @@ def process_command(command: str, agent, llm, chat_history: List = None) -> str:
         elif "not found" in error_msg or "404" in error_msg:
             return "The requested resource was not found. Please check your request and try again."
         else:
-            return f"An error occurred: {e}\n\nIf this persists, try running `baymax --setup`."
+            return f"An error occurred: {e}\n\nIf this persists, check your API keys and try again."
 
 
 def display_welcome():
     """Display welcome message."""
     welcome_text = """
-# Hello! I am Baymax, your personal healthcare— I mean, *digital life* companion.
+# Hello! I am Baymax, your personal healthcare-- I mean, *digital life* companion.
 
 I can help you with:
 - **Email**: "read my unread emails", "summarize my inbox"
@@ -488,18 +579,29 @@ def run_setup():
         )
     )
 
-    # Check for API key
-    if not Config.API_KEY:
-        console.print("\n[error]API_KEY not found![/error]")
-        console.print("\n[info]Add your API key to .env:[/info]")
-        console.print("  API_KEY=your_api_key_here")
+    # Check for Anthropic/Foundry configuration
+    if Config.USE_FOUNDRY:
+        console.print("\n[info]Azure AI Foundry mode enabled (USE_FOUNDRY=1)[/info]")
+        if not Config.ANTHROPIC_FOUNDRY_API_KEY:
+            console.print("[error]ANTHROPIC_FOUNDRY_API_KEY not found![/error]")
+        else:
+            console.print("[success]ANTHROPIC_FOUNDRY_API_KEY: Set[/success]")
+        if not Config.ANTHROPIC_FOUNDRY_RESOURCE:
+            console.print("[error]ANTHROPIC_FOUNDRY_RESOURCE not found![/error]")
+        else:
+            console.print(
+                f"[success]ANTHROPIC_FOUNDRY_RESOURCE: {Config.ANTHROPIC_FOUNDRY_RESOURCE}[/success]"
+            )
         console.print("")
-
-    # Check for Target URL
-    if not Config.TARGET_URL:
-        console.print("\n[error]TARGET_URL not found![/error]")
-        console.print("\n[info]Add your API endpoint to .env:[/info]")
-        console.print("  TARGET_URL=your_api_endpoint_here")
+    elif not Config.ANTHROPIC_API_KEY:
+        console.print("\n[error]ANTHROPIC_API_KEY not found![/error]")
+        console.print("\n[info]For direct Anthropic API, add to .env:[/info]")
+        console.print("  ANTHROPIC_API_KEY=your_api_key_here")
+        console.print("")
+        console.print("[info]For Azure AI Foundry, add to .env:[/info]")
+        console.print("  USE_FOUNDRY=1")
+        console.print("  ANTHROPIC_FOUNDRY_API_KEY=your_foundry_api_key")
+        console.print("  ANTHROPIC_FOUNDRY_RESOURCE=your-resource-name")
         console.print("")
 
     # Check for Composio API key
@@ -514,12 +616,8 @@ def run_setup():
 
     try:
         from composio import Composio
-        from composio_langchain import LangchainProvider
 
-        client = Composio(
-            provider=LangchainProvider(),
-            api_key=Config.COMPOSIO_API_KEY,
-        )
+        client = Composio(api_key=Config.COMPOSIO_API_KEY)
 
         console.print("\n[success]Composio API key found![/success]\n")
 
@@ -561,7 +659,7 @@ def run_setup():
             if active_toolkits:
                 console.print("\n[success]Connected apps:[/success]")
                 for toolkit in sorted(active_toolkits):
-                    console.print(f"  [success]✓[/success] {toolkit}")
+                    console.print(f"  [success]v[/success] {toolkit}")
             else:
                 console.print("\n[warning]No apps connected yet.[/warning]")
                 console.print("Visit https://app.composio.dev/apps to connect your first app!")
@@ -573,7 +671,7 @@ def run_setup():
         console.print("Run 'baymax' to start the interactive mode.")
 
     except ImportError:
-        console.print("[error]Composio not installed. Run: pip install composio-langchain[/error]")
+        console.print("[error]Composio not installed. Run: pip install composio[/error]")
     except Exception as e:
         console.print(f"[error]Setup error: {e}[/error]")
 
@@ -613,6 +711,7 @@ def main(
     if version:
         console.print("[baymax]Baymax[/baymax] v1.0.0")
         console.print(f"Using model: {Config.MODEL_NAME}")
+        console.print("Powered by Anthropic Claude SDK")
         console.print("Your calm, efficient personal AI assistant.")
         raise typer.Exit(0)
 
@@ -641,16 +740,30 @@ def start_repl():
         console.print("Run 'baymax --setup' for help.")
         raise typer.Exit(1)
 
-    # Create agent
+    # Initialize Anthropic client
     try:
-        agent, llm, tools = create_baymax_agent()
+        client = get_anthropic_client()
     except Exception as e:
-        console.print(f"[error]Failed to initialize: {e}[/error]")
+        console.print(f"[error]Failed to initialize Anthropic client: {e}[/error]")
         raise typer.Exit(1)
+
+    # Load Composio tools
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Loading tools...", total=None)
+        tools = tool_loader.load_tools()
+
+    if not tools:
+        console.print("[warning]No tools loaded. Some features may not work.[/warning]")
+        console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
 
     # Interactive REPL mode
     display_welcome()
-    chat_history = []
+    chat_history: List[Dict[str, Any]] = []
 
     while True:
         try:
@@ -674,17 +787,15 @@ def start_repl():
                 continue
 
             # Process the command
-            response = process_command(user_input, agent, llm, chat_history)
+            response = process_command(user_input, client, tools, chat_history)
 
             # Display response
             console.print(f"\n[baymax]Baymax:[/baymax]")
             display_response(response)
 
-            # Update chat history (keep last 10 exchanges)
-            from langchain_core.messages import HumanMessage, AIMessage
-
-            chat_history.append(HumanMessage(content=user_input))
-            chat_history.append(AIMessage(content=response))
+            # Update chat history (keep last 10 exchanges = 20 messages)
+            chat_history.append({"role": "user", "content": user_input})
+            chat_history.append({"role": "assistant", "content": response})
             if len(chat_history) > 20:
                 chat_history = chat_history[-20:]
 
@@ -716,15 +827,16 @@ def run_command(
         console.print("Run 'baymax --setup' for help.")
         raise typer.Exit(1)
 
-    # Create agent
+    # Initialize client and tools
     try:
-        agent, llm, tools = create_baymax_agent()
+        client = get_anthropic_client()
+        tools = tool_loader.load_tools()
     except Exception as e:
         console.print(f"[error]Failed to initialize: {e}[/error]")
         raise typer.Exit(1)
 
     # Process the command
-    response = process_command(command, agent, llm)
+    response = process_command(command, client, tools)
     display_response(response)
 
 
@@ -749,12 +861,19 @@ def status():
     console.print(
         f"  COMPOSIO_API_KEY: {'[success]Set[/success]' if Config.COMPOSIO_API_KEY else '[error]Missing[/error]'}"
     )
-    console.print(
-        f"  API_KEY: {'[success]Set[/success]' if Config.API_KEY else '[error]Missing[/error]'}"
-    )
-    console.print(
-        f"  TARGET_URL: {'[success]Set[/success]' if Config.TARGET_URL else '[error]Missing[/error]'}"
-    )
+    if Config.USE_FOUNDRY:
+        console.print("  Mode: [info]Azure AI Foundry[/info]")
+        console.print(
+            f"  ANTHROPIC_FOUNDRY_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_FOUNDRY_API_KEY else '[error]Missing[/error]'}"
+        )
+        console.print(
+            f"  ANTHROPIC_FOUNDRY_RESOURCE: {'[success]' + Config.ANTHROPIC_FOUNDRY_RESOURCE + '[/success]' if Config.ANTHROPIC_FOUNDRY_RESOURCE else '[error]Missing[/error]'}"
+        )
+    else:
+        console.print("  Mode: [info]Direct Anthropic API[/info]")
+        console.print(
+            f"  ANTHROPIC_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_API_KEY else '[error]Missing[/error]'}"
+        )
     console.print(f"  Model: {Config.MODEL_NAME}")
 
     if valid:
@@ -766,12 +885,8 @@ def status():
     if Config.COMPOSIO_API_KEY:
         try:
             from composio import Composio
-            from composio_langchain import LangchainProvider
 
-            client = Composio(
-                provider=LangchainProvider(),
-                api_key=Config.COMPOSIO_API_KEY,
-            )
+            client = Composio(api_key=Config.COMPOSIO_API_KEY)
 
             # Fetch all pages of connected accounts
             all_items = []
@@ -785,8 +900,8 @@ def status():
             # Filter to only ACTIVE connections and get unique toolkits
             active_toolkits = set()
             for conn in all_items:
-                status = getattr(conn, "status", None)
-                if status == "ACTIVE":
+                status_val = getattr(conn, "status", None)
+                if status_val == "ACTIVE":
                     toolkit = getattr(conn, "toolkit", None)
                     if toolkit:
                         slug = getattr(toolkit, "slug", None) or str(toolkit)
@@ -795,7 +910,7 @@ def status():
             console.print("\n[info]Connected Apps:[/info]")
             if active_toolkits:
                 for toolkit in sorted(active_toolkits):
-                    console.print(f"  [success]✓[/success] {toolkit}")
+                    console.print(f"  [success]v[/success] {toolkit}")
             else:
                 console.print("  [warning]No apps connected[/warning]")
 

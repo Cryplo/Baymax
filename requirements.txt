@@ -8,10 +8,8 @@ rich>=13.0.0
 # Environment Configuration
 python-dotenv>=1.0.0
 
-# LangChain & LLM (Anthropic Claude)
-langchain>=0.2.0
-langchain-anthropic>=0.1.0
-langchain-core>=0.2.0
+# Anthropic Claude SDK
+anthropic>=0.40.0
 
 # Composio Tool Integrations
-composio-langchain>=0.10.0
+composio>=0.5.0
