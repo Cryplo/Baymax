@@ -6,43 +6,35 @@ Baymax - Your Personal AI Command Center
 A calm, efficient CLI AI agent that acts as a single natural-language
 command center for your digital life.
 
+Built with the Claude Agent SDK for powerful autonomous capabilities.
+
 SETUP INSTRUCTIONS
 ------------------
-1. Install dependencies:
+1. Install Claude Code runtime:
+   curl -fsSL https://claude.ai/install.sh | bash
+
+2. Install dependencies:
    pip install -e .
 
-   Or manually:
-   pip install typer rich python-dotenv anthropic composio
+3. Set your API key:
+   export ANTHROPIC_API_KEY=your_api_key
 
-2. Create a .env file with your API keys:
-
-   For direct Anthropic API:
-     ANTHROPIC_API_KEY=your_api_key
-     COMPOSIO_API_KEY=your_composio_api_key
-
-   For Azure AI Foundry:
-     USE_FOUNDRY=1
-     ANTHROPIC_FOUNDRY_API_KEY=your_foundry_api_key
-     ANTHROPIC_FOUNDRY_RESOURCE=your-resource-name
-     COMPOSIO_API_KEY=your_composio_api_key
-
-3. Run Baymax setup to connect your accounts:
-   baymax --setup
-
-   Or: python baymax.py --setup
+   Or for Azure AI Foundry:
+   export CLAUDE_CODE_USE_FOUNDRY=1
+   (and configure Azure credentials)
 
 4. Start using Baymax:
    baymax                      # Interactive REPL mode
-   baymax "read my emails"     # One-off command mode
+   baymax run "read my emails" # One-off command mode
 
 USAGE EXAMPLES
 --------------
 - "read my unread emails"
 - "summarize my inbox"
-- "post to X: Hello from Baymax!"
 - "show my calendar today"
 - "create a task: Buy groceries"
-- "send a message on Discord to #general: Hello!"
+- "find all Python files in this directory"
+- "what's in the README?"
 
 Author: Your friendly AI assistant
 License: MIT
@@ -50,7 +42,7 @@ License: MIT
 
 import os
 import sys
-import json
+import asyncio
 from typing import Optional, List, Any, Dict
 
 import typer
@@ -60,6 +52,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.theme import Theme
+from rich.live import Live
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -94,39 +87,37 @@ app = typer.Typer(
 class Config:
     """Configuration management for Baymax."""
 
-    # Required
+    # Model configuration
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "sonnet")
+
+    # Composio API key for external service integrations
     COMPOSIO_API_KEY: str = os.getenv("COMPOSIO_API_KEY", "")
 
-    # Anthropic direct API key (mutually exclusive with Foundry)
-    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-
-    # Azure AI Foundry configuration
-    # Set USE_FOUNDRY=1 to use Azure AI Foundry instead of direct Anthropic
-    USE_FOUNDRY: bool = os.getenv("USE_FOUNDRY", "0") == "1"
-
-    # Foundry credentials (only used when USE_FOUNDRY=1)
-    # API key for Foundry
-    ANTHROPIC_FOUNDRY_API_KEY: str = os.getenv("ANTHROPIC_FOUNDRY_API_KEY", "")
-    # Resource name (e.g., "my-resource" -> https://my-resource.services.ai.azure.com/anthropic/)
-    ANTHROPIC_FOUNDRY_RESOURCE: str = os.getenv("ANTHROPIC_FOUNDRY_RESOURCE", "")
-
-    # Model configuration
-    MODEL_NAME: str = os.getenv("MODEL_NAME", "claude-sonnet-4-5-20250929")
-
-    # Composio apps to load (easily extensible)
-    COMPOSIO_APPS: List[str] = [
-        "GMAIL",
-        "GOOGLECALENDAR",
-        "DISCORD",
-        "REDDIT",
-        "LINKEDIN",
-        "GOOGLETASKS",
-        "NOTION",
-        "TWITTER",  # X (formerly Twitter)
-        "GITHUB",
+    # Allowed tools for the agent (built-in + Composio MCP tools)
+    ALLOWED_TOOLS: List[str] = [
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+        "Task",  # For subagents
     ]
 
-    # System prompt for the AI agent
+    # Composio apps to enable via MCP
+    COMPOSIO_APPS: List[str] = [
+        "gmail",
+        "googlecalendar",
+        "googletasks",
+        "github",
+        "notion",
+        "discord",
+        "linkedin",
+    ]
+
+    # System prompt for Baymax personality
     SYSTEM_PROMPT: str = """You are Baymax, a calm, efficient personal assistant. 
 
 Your personality:
@@ -138,10 +129,10 @@ Your personality:
 Guidelines:
 - Use tools when needed to accomplish tasks
 - Keep responses short and actionable
-- Format responses nicely for terminal display
+- Format responses nicely for terminal display (use markdown)
 - If a tool fails, explain what went wrong clearly
 - Never hallucinate or make up information
-- When listing items (emails, tasks, events), format them clearly
+- When listing items, format them clearly with bullet points or numbers
 
 Remember: You are here to help manage the user's digital life efficiently."""
 
@@ -150,397 +141,175 @@ Remember: You are here to help manage the user's digital life efficiently."""
         """Validate configuration and return status with missing items."""
         missing = []
 
-        if not cls.COMPOSIO_API_KEY:
-            missing.append("COMPOSIO_API_KEY")
+        # Check for API key (either direct or via Foundry)
+        use_foundry = os.getenv("CLAUDE_CODE_USE_FOUNDRY", "0") == "1"
+        has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
 
-        if cls.USE_FOUNDRY:
-            # Foundry mode - need Foundry API key and resource
-            if not cls.ANTHROPIC_FOUNDRY_API_KEY:
-                missing.append("ANTHROPIC_FOUNDRY_API_KEY")
-            if not cls.ANTHROPIC_FOUNDRY_RESOURCE:
-                missing.append("ANTHROPIC_FOUNDRY_RESOURCE")
-        else:
-            # Direct Anthropic mode
-            if not cls.ANTHROPIC_API_KEY:
-                missing.append("ANTHROPIC_API_KEY")
+        if not use_foundry and not has_api_key:
+            missing.append("ANTHROPIC_API_KEY (or set CLAUDE_CODE_USE_FOUNDRY=1)")
 
         return len(missing) == 0, missing
 
+    @classmethod
+    def get_composio_mcp_config(cls) -> Dict[str, Any]:
+        """Get MCP server configuration for Composio integrations."""
+        if not cls.COMPOSIO_API_KEY:
+            return {}
 
-# =============================================================================
-# COMPOSIO TOOL LOADER
-# =============================================================================
-
-
-class ToolLoader:
-    """Dynamic tool loader for Composio integrations.
-
-    Converts Composio tools to Anthropic SDK ToolParam format.
-    """
-
-    def __init__(self):
-        self._client = None
-        self._tools = None
-        self._tool_map: Dict[str, Any] = {}  # Maps tool name to callable
-        # External user ID - this should match your Composio user ID
-        self._user_id = os.getenv("COMPOSIO_USER_ID", "default")
-
-    def _get_user_id_from_accounts(self) -> str:
-        """Get the user_id from connected accounts if not set via env."""
-        if self._user_id != "default":
-            return self._user_id
-
-        try:
-            response = self._client.connected_accounts.list()
-            items = getattr(response, "items", [])
-
-            for conn in items:
-                if getattr(conn, "status", None) == "ACTIVE":
-                    user_id = getattr(conn, "user_id", None)
-                    if user_id:
-                        return user_id
-
-            return "default"
-        except Exception:
-            return "default"
-
-    def _get_allowed_tools_from_mcp(self) -> List[str]:
-        """Get the list of allowed tools from MCP configurations."""
-        try:
-            # Get all MCP configs (paginated)
-            all_mcps = []
-            page_no = 1
-
-            while True:
-                response = self._client.mcp.list(page_no=page_no)
-                items = response.get("items", [])
-                all_mcps.extend(items)
-
-                current_page = response.get("current_page", 1)
-                total_pages = response.get("total_pages", 1)
-
-                if current_page >= total_pages:
-                    break
-                page_no += 1
-
-            # Extract all allowed tools from MCP configs
-            all_allowed_tools = []
-            for mcp in all_mcps:
-                tools = getattr(mcp, "allowed_tools", [])
-                all_allowed_tools.extend(tools)
-
-            return list(set(all_allowed_tools))  # Deduplicate
-
-        except Exception as e:
-            console.print(f"[warning]Could not load MCP configs: {e}[/warning]")
-            return []
-
-    def _sanitize_tool_name(self, name: str) -> str:
-        """Sanitize tool name to match Anthropic's pattern: ^[a-zA-Z0-9_-]{1,128}$"""
-        import re
-
-        # Replace any invalid characters with underscores
-        sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-
-        # Remove consecutive underscores
-        sanitized = re.sub(r"_+", "_", sanitized)
-
-        # Remove leading/trailing underscores
-        sanitized = sanitized.strip("_-")
-
-        # Truncate to 128 characters
-        if len(sanitized) > 128:
-            sanitized = sanitized[:128].rstrip("_-")
-
-        # Ensure it's not empty
-        if not sanitized:
-            sanitized = "tool"
-
-        return sanitized
-
-    def _convert_to_anthropic_tool(self, composio_tool: Any) -> Dict[str, Any]:
-        """Convert a Composio tool to Anthropic ToolParam format."""
-        # Get original tool name
-        original_name = getattr(composio_tool, "name", str(composio_tool))
-
-        # Sanitize tool name to match Anthropic's requirements
-        tool_name = self._sanitize_tool_name(original_name)
-
-        # Get description and truncate if needed (no hard limit but keep reasonable)
-        description = getattr(composio_tool, "description", "")
-        if len(description) > 1024:
-            description = description[:1021] + "..."
-
-        # Composio tools have name, description, and input schema
-        tool_dict = {
-            "name": tool_name,
-            "description": description,
-            "input_schema": getattr(
-                composio_tool, "input_schema", {"type": "object", "properties": {}}
-            ),
+        # Composio MCP server configuration
+        # Uses SSE transport to connect to Composio's hosted MCP servers
+        return {
+            "composio": {
+                "type": "sse",
+                "url": f"https://mcp.composio.dev/sse?api_key={cls.COMPOSIO_API_KEY}",
+            }
         }
-        return tool_dict
-
-    def load_tools(self, apps: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Load tools from Composio and convert to Anthropic format."""
-        if self._tools is not None:
-            return self._tools
-
-        try:
-            from composio import Composio
-
-            # Initialize Composio client
-            self._client = Composio(api_key=Config.COMPOSIO_API_KEY)
-
-            # Get the correct user_id
-            self._user_id = self._get_user_id_from_accounts()
-
-            # Get allowed tools from MCP configurations
-            allowed_tools = self._get_allowed_tools_from_mcp()
-
-            anthropic_tools = []
-
-            if allowed_tools:
-                console.print(
-                    f"[info]Loading {len(allowed_tools)} tools from MCP configs...[/info]"
-                )
-
-                try:
-                    tools = self._client.tools.get(
-                        user_id=self._user_id,
-                        tools=allowed_tools,
-                    )
-                    composio_tools = list(tools) if tools else []
-
-                    for tool in composio_tools:
-                        anthropic_tool = self._convert_to_anthropic_tool(tool)
-                        anthropic_tools.append(anthropic_tool)
-                        self._tool_map[anthropic_tool["name"]] = tool
-
-                except Exception as e:
-                    console.print(f"[warning]Could not load tools: {e}[/warning]")
-            else:
-                # Fallback: load tools for each app if no MCP configs found
-                console.print("[info]No MCP configs found, loading default tools...[/info]")
-                apps_to_load = apps or Config.COMPOSIO_APPS
-                toolkits = [app.lower() for app in apps_to_load]
-
-                for toolkit in toolkits:
-                    try:
-                        tools = self._client.tools.get(
-                            user_id=self._user_id,
-                            toolkits=[toolkit],
-                        )
-                        toolkit_tools = list(tools) if tools else []
-
-                        for tool in toolkit_tools:
-                            anthropic_tool = self._convert_to_anthropic_tool(tool)
-                            anthropic_tools.append(anthropic_tool)
-                            self._tool_map[anthropic_tool["name"]] = tool
-
-                    except Exception as e:
-                        console.print(f"[warning]Could not load {toolkit} tools: {e}[/warning]")
-
-            self._tools = anthropic_tools
-            return self._tools
-
-        except ImportError:
-            console.print("[error]Composio not installed. Run: pip install composio[/error]")
-            return []
-        except Exception as e:
-            console.print(f"[error]Failed to load Composio tools: {e}[/error]")
-            return []
-
-    def execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
-        """Execute a tool by name with the given input."""
-        if tool_name not in self._tool_map:
-            return f"Error: Tool '{tool_name}' not found"
-
-        try:
-            tool = self._tool_map[tool_name]
-            # Composio tools are callable
-            result = tool.run(tool_input)
-
-            if isinstance(result, dict):
-                return json.dumps(result, indent=2)
-            return str(result)
-        except Exception as e:
-            return f"Error executing tool '{tool_name}': {e}"
-
-    @property
-    def client(self):
-        return self._client
-
-    @property
-    def user_id(self):
-        return self._user_id
-
-    @property
-    def tool_map(self):
-        return self._tool_map
-
-
-tool_loader = ToolLoader()
 
 
 # =============================================================================
-# ANTHROPIC CLIENT SETUP
+# AGENT SDK CLIENT
 # =============================================================================
 
 
-def get_anthropic_client():
-    """Get the configured Anthropic client.
+async def process_command_async(
+    prompt: str,
+    continue_conversation: bool = False,
+    session_id: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Process a command using the Claude Agent SDK.
 
-    Supports:
-    - Direct Anthropic API (default)
-    - Azure AI Foundry (set USE_FOUNDRY=1)
+    Returns:
+        Tuple of (response_text, session_id)
     """
     try:
-        if Config.USE_FOUNDRY:
-            # Use Azure AI Foundry client
-            from anthropic import AnthropicFoundry
-
-            client = AnthropicFoundry(
-                api_key=Config.ANTHROPIC_FOUNDRY_API_KEY,
-                resource=Config.ANTHROPIC_FOUNDRY_RESOURCE,
-            )
-            console.print(
-                f"[info]Using Azure AI Foundry: {Config.ANTHROPIC_FOUNDRY_RESOURCE}[/info]"
-            )
-        else:
-            # Use standard Anthropic client
-            from anthropic import Anthropic
-
-            client = Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-
-        return client
-
-    except ImportError as e:
-        console.print(f"[error]anthropic not installed: {e}[/error]")
-        console.print("[info]Run: pip install anthropic[/info]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[error]Failed to initialize Anthropic client: {e}[/error]")
-        raise typer.Exit(1)
-
-
-# =============================================================================
-# CORE FUNCTIONS
-# =============================================================================
-
-
-def process_command(
-    command: str,
-    client,
-    tools: List[Dict[str, Any]],
-    chat_history: List[Dict[str, Any]] = None,
-) -> str:
-    """Process a natural language command using Anthropic SDK with tool use."""
-    chat_history = chat_history or []
+        from claude_agent_sdk import (
+            ClaudeSDKClient,
+            ClaudeAgentOptions,
+            AssistantMessage,
+            TextBlock,
+            ToolUseBlock,
+            ResultMessage,
+        )
+    except ImportError:
+        return (
+            "Claude Agent SDK not installed. Run: pip install claude-agent-sdk\n\n"
+            "Also ensure Claude Code is installed: curl -fsSL https://claude.ai/install.sh | bash",
+            None,
+        )
 
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            progress.add_task("Thinking...", total=None)
+        # Build options with optional MCP servers for Composio integrations
+        mcp_servers = Config.get_composio_mcp_config()
 
-            # Build messages list
-            messages = chat_history.copy()
-            messages.append({"role": "user", "content": command})
+        options = ClaudeAgentOptions(
+            allowed_tools=Config.ALLOWED_TOOLS,
+            system_prompt=Config.SYSTEM_PROMPT,
+            model=Config.MODEL_NAME,
+            permission_mode="bypassPermissions",  # Auto-approve for CLI use
+            resume=session_id if continue_conversation and session_id else None,
+            mcp_servers=mcp_servers if mcp_servers else None,
+        )
 
-            # Initial API call
-            response = client.messages.create(
-                model=Config.MODEL_NAME,
-                max_tokens=2048,
-                system=Config.SYSTEM_PROMPT,
-                tools=tools if tools else None,
-                messages=messages,
-            )
+        response_parts = []
+        new_session_id = None
 
-        # Handle tool use loop (agentic behavior)
-        while response.stop_reason == "tool_use":
-            # Extract tool use blocks
-            tool_uses = [block for block in response.content if block.type == "tool_use"]
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
 
-            # Execute each tool and collect results
-            tool_results = []
-            for tool_use in tool_uses:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console,
-                    transient=True,
-                ) as progress:
-                    progress.add_task(f"Running {tool_use.name}...", total=None)
+            async for message in client.receive_response():
+                # Capture session ID from init message
+                if hasattr(message, "subtype") and message.subtype == "init":
+                    new_session_id = getattr(message, "session_id", None)
 
-                    result = tool_loader.execute_tool(tool_use.name, tool_use.input)
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_use.id,
-                            "content": result,
-                        }
-                    )
+                # Process assistant messages
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            response_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            # Optionally show tool usage
+                            pass
 
-            # Add assistant response and tool results to messages
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
+                # Check for result
+                if isinstance(message, ResultMessage):
+                    if message.is_error:
+                        response_parts.append(f"\n[Error: {message.result}]")
+                    break
 
-            # Continue the conversation
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-                transient=True,
-            ) as progress:
-                progress.add_task("Thinking...", total=None)
-
-                response = client.messages.create(
-                    model=Config.MODEL_NAME,
-                    max_tokens=2048,
-                    system=Config.SYSTEM_PROMPT,
-                    tools=tools if tools else None,
-                    messages=messages,
-                )
-
-        # Extract final text response
-        text_blocks = [block.text for block in response.content if hasattr(block, "text")]
-        return (
-            "\n".join(text_blocks)
-            if text_blocks
+        response = (
+            "\n".join(response_parts)
+            if response_parts
             else "I processed your request but have no response."
         )
+        return response, new_session_id or session_id
 
     except Exception as e:
         error_msg = str(e).lower()
 
         # Friendly error messages
-        if "authentication" in error_msg or "auth" in error_msg or "401" in error_msg:
-            return "Authentication failed. Please check your API key or Azure credentials."
-        elif "rate limit" in error_msg or "429" in error_msg:
-            return "Rate limit reached. Please wait a moment and try again."
-        elif "network" in error_msg or "connection" in error_msg:
-            return "Network error. Please check your internet connection and try again."
-        elif "not found" in error_msg or "404" in error_msg:
-            return "The requested resource was not found. Please check your request and try again."
+        if "not found" in error_msg or "cli" in error_msg:
+            return (
+                "Claude Code CLI not found. Please install it:\n"
+                "  curl -fsSL https://claude.ai/install.sh | bash",
+                session_id,
+            )
+        elif "authentication" in error_msg or "api key" in error_msg:
+            return (
+                "Authentication failed. Please set your API key:\n"
+                "  export ANTHROPIC_API_KEY=your_api_key",
+                session_id,
+            )
         else:
-            return f"An error occurred: {e}\n\nIf this persists, check your API keys and try again."
+            return f"An error occurred: {e}", session_id
+
+
+def process_command(
+    prompt: str,
+    continue_conversation: bool = False,
+    session_id: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Synchronous wrapper for process_command_async."""
+    return asyncio.run(process_command_async(prompt, continue_conversation, session_id))
+
+
+# =============================================================================
+# UI FUNCTIONS
+# =============================================================================
 
 
 def display_welcome():
     """Display welcome message."""
-    welcome_text = """
+    # Check if Composio is configured for dynamic welcome message
+    has_composio = bool(Config.COMPOSIO_API_KEY)
+
+    base_capabilities = """
+- **Files**: "read the README", "find all Python files", "edit config.json"
+- **Commands**: "run the tests", "check git status", "list directory"
+- **Web**: "search for Python tutorials", "fetch docs from URL"
+- **Tasks**: "create a todo list", "summarize this codebase"
+"""
+
+    external_capabilities = """
+- **Email**: "read my unread emails", "send an email to John"
+- **Calendar**: "show my schedule today", "create a meeting for tomorrow"
+- **Apps**: Slack, GitHub, Notion, Discord, LinkedIn, and more!
+"""
+
+    if has_composio:
+        welcome_text = f"""
 # Hello! I am Baymax, your personal healthcare-- I mean, *digital life* companion.
 
 I can help you with:
-- **Email**: "read my unread emails", "summarize my inbox"
-- **Calendar**: "show my calendar today", "what's on my schedule tomorrow"
-- **Tasks**: "create a task: Buy groceries", "show my tasks"
-- **Social**: "post to X: Hello world!", "check my Discord messages"
-- **And more**: GitHub, Reddit, LinkedIn, Notion...
+{base_capabilities}{external_capabilities}
+Type your request, or type `exit` to quit.
+"""
+    else:
+        welcome_text = f"""
+# Hello! I am Baymax, your personal healthcare-- I mean, *digital life* companion.
+
+I can help you with:
+{base_capabilities}
+*Tip: Run `baymax --setup` to enable Gmail, Calendar, Slack integrations!*
 
 Type your request, or type `exit` to quit.
 """
@@ -556,7 +325,6 @@ Type your request, or type `exit` to quit.
 
 def display_response(response: str):
     """Display the agent's response with nice formatting."""
-    # Try to render as markdown
     try:
         md = Markdown(response)
         console.print(Panel(md, border_style="cyan", padding=(0, 1)))
@@ -570,110 +338,71 @@ def display_response(response: str):
 
 
 def run_setup():
-    """Interactive setup wizard for Composio connections."""
+    """Interactive setup wizard."""
     console.print(
         Panel(
-            "[baymax]Baymax Setup Wizard[/baymax]\n\n"
-            "Let's connect your accounts so I can help you manage your digital life.",
+            "[baymax]Baymax Setup Wizard[/baymax]\n\nLet's get you set up with Baymax!",
             border_style="magenta",
         )
     )
 
-    # Check for Anthropic/Foundry configuration
-    if Config.USE_FOUNDRY:
-        console.print("\n[info]Azure AI Foundry mode enabled (USE_FOUNDRY=1)[/info]")
-        if not Config.ANTHROPIC_FOUNDRY_API_KEY:
-            console.print("[error]ANTHROPIC_FOUNDRY_API_KEY not found![/error]")
-        else:
-            console.print("[success]ANTHROPIC_FOUNDRY_API_KEY: Set[/success]")
-        if not Config.ANTHROPIC_FOUNDRY_RESOURCE:
-            console.print("[error]ANTHROPIC_FOUNDRY_RESOURCE not found![/error]")
-        else:
-            console.print(
-                f"[success]ANTHROPIC_FOUNDRY_RESOURCE: {Config.ANTHROPIC_FOUNDRY_RESOURCE}[/success]"
-            )
-        console.print("")
-    elif not Config.ANTHROPIC_API_KEY:
-        console.print("\n[error]ANTHROPIC_API_KEY not found![/error]")
-        console.print("\n[info]For direct Anthropic API, add to .env:[/info]")
-        console.print("  ANTHROPIC_API_KEY=your_api_key_here")
-        console.print("")
-        console.print("[info]For Azure AI Foundry, add to .env:[/info]")
-        console.print("  USE_FOUNDRY=1")
-        console.print("  ANTHROPIC_FOUNDRY_API_KEY=your_foundry_api_key")
-        console.print("  ANTHROPIC_FOUNDRY_RESOURCE=your-resource-name")
+    # Check for Claude Code CLI
+    console.print("\n[info]Checking for Claude Code CLI...[/info]")
+    import shutil
+
+    if shutil.which("claude"):
+        console.print("[success]Claude Code CLI is installed![/success]")
+    else:
+        console.print("[error]Claude Code CLI not found![/error]")
+        console.print("\n[info]Install it with:[/info]")
+        console.print("  curl -fsSL https://claude.ai/install.sh | bash")
         console.print("")
 
-    # Check for Composio API key
-    if not Config.COMPOSIO_API_KEY:
-        console.print("\n[error]COMPOSIO_API_KEY not found![/error]")
-        console.print("\n[info]To get your Composio API key:[/info]")
-        console.print("1. Go to https://app.composio.dev")
-        console.print("2. Sign up or log in")
-        console.print("3. Copy your API key from the dashboard")
-        console.print("4. Add it to your .env file: COMPOSIO_API_KEY=your_key_here")
-        return
+    # Check for API key
+    use_foundry = os.getenv("CLAUDE_CODE_USE_FOUNDRY", "0") == "1"
+    has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
 
-    try:
-        from composio import Composio
+    console.print("\n[info]Checking authentication...[/info]")
 
-        client = Composio(api_key=Config.COMPOSIO_API_KEY)
+    if use_foundry:
+        console.print(
+            "[success]Azure AI Foundry mode enabled (CLAUDE_CODE_USE_FOUNDRY=1)[/success]"
+        )
+    elif has_api_key:
+        console.print("[success]ANTHROPIC_API_KEY is set![/success]")
+    else:
+        console.print("[error]No API key found![/error]")
+        console.print("\n[info]Set your API key:[/info]")
+        console.print("  export ANTHROPIC_API_KEY=your_api_key")
+        console.print("")
+        console.print("[info]Or for Azure AI Foundry:[/info]")
+        console.print("  export CLAUDE_CODE_USE_FOUNDRY=1")
+        console.print("  (and configure Azure credentials)")
 
-        console.print("\n[success]Composio API key found![/success]\n")
+    console.print("\n[info]Built-in tools:[/info]")
+    for tool in Config.ALLOWED_TOOLS:
+        console.print(f"  - {tool}")
 
-        # Show available apps
-        console.print("[info]Available integrations:[/info]")
-        for i, app in enumerate(Config.COMPOSIO_APPS, 1):
-            console.print(f"  {i}. {app}")
+    # Check Composio integration
+    console.print("\n[info]Checking Composio integration...[/info]")
+    if Config.COMPOSIO_API_KEY:
+        console.print("[success]COMPOSIO_API_KEY is set![/success]")
+        console.print("\n[info]Configured external services:[/info]")
+        for app in Config.COMPOSIO_APPS:
+            console.print(f"  - {app}")
+        console.print("\n[info]To connect your accounts, visit:[/info]")
+        console.print("  https://app.composio.dev/apps")
+    else:
+        console.print("[warning]COMPOSIO_API_KEY not set (optional)[/warning]")
+        console.print("\n[info]Composio enables external service integrations:[/info]")
+        console.print("  Gmail, Google Calendar, Slack, GitHub, Notion, Discord, etc.")
+        console.print("\n[info]To enable:[/info]")
+        console.print("  1. Sign up at https://composio.dev")
+        console.print("  2. Get your API key from the dashboard")
+        console.print("  3. Set COMPOSIO_API_KEY in your .env file")
 
-        console.print("\n[info]To connect an app:[/info]")
-        console.print("  1. Go to https://app.composio.dev/apps")
-        console.print("  2. Find the app you want to connect (e.g., Gmail, Google Calendar)")
-        console.print("  3. Click 'Connect' and follow the OAuth flow")
-        console.print("  4. Your connected accounts will appear in your dashboard")
-
-        # Check connected apps
-        console.print("\n[info]Checking connected apps...[/info]")
-        try:
-            # Fetch all pages of connected accounts
-            all_items = []
-            response = client.connected_accounts.list()
-            all_items.extend(getattr(response, "items", []) or [])
-
-            # Paginate through all results
-            while getattr(response, "next_cursor", None):
-                response = client.connected_accounts.list(cursor=response.next_cursor)
-                all_items.extend(getattr(response, "items", []) or [])
-
-            # Filter to only ACTIVE connections and get unique toolkits
-            active_toolkits = set()
-            for conn in all_items:
-                status = getattr(conn, "status", None)
-                if status == "ACTIVE":
-                    toolkit = getattr(conn, "toolkit", None)
-                    if toolkit:
-                        # toolkit is an object with a 'slug' attribute
-                        slug = getattr(toolkit, "slug", None) or str(toolkit)
-                        active_toolkits.add(slug)
-
-            if active_toolkits:
-                console.print("\n[success]Connected apps:[/success]")
-                for toolkit in sorted(active_toolkits):
-                    console.print(f"  [success]v[/success] {toolkit}")
-            else:
-                console.print("\n[warning]No apps connected yet.[/warning]")
-                console.print("Visit https://app.composio.dev/apps to connect your first app!")
-
-        except Exception as e:
-            console.print(f"\n[warning]Could not check connections: {e}[/warning]")
-
-        console.print("\n[success]Setup complete! You can now use Baymax.[/success]")
-        console.print("Run 'baymax' to start the interactive mode.")
-
-    except ImportError:
-        console.print("[error]Composio not installed. Run: pip install composio[/error]")
-    except Exception as e:
-        console.print(f"[error]Setup error: {e}[/error]")
+    console.print("\n[success]Setup check complete![/success]")
+    console.print("Run 'baymax' to start the interactive mode.")
 
 
 # =============================================================================
@@ -688,7 +417,7 @@ def main(
         False,
         "--setup",
         "-s",
-        help="Run the setup wizard to connect your accounts",
+        help="Run the setup wizard",
     ),
     version: bool = typer.Option(
         False,
@@ -704,14 +433,14 @@ def main(
 
     Examples:
         baymax                           # Interactive mode
-        baymax run "read my emails"      # One-off command
+        baymax run "what files are here" # One-off command
         baymax --setup                   # Setup wizard
     """
     # Version
     if version:
-        console.print("[baymax]Baymax[/baymax] v1.0.0")
-        console.print(f"Using model: {Config.MODEL_NAME}")
-        console.print("Powered by Anthropic Claude SDK")
+        console.print("[baymax]Baymax[/baymax] v2.0.0")
+        console.print("Powered by Claude Agent SDK")
+        console.print(f"Model: {Config.MODEL_NAME}")
         console.print("Your calm, efficient personal AI assistant.")
         raise typer.Exit(0)
 
@@ -736,34 +465,12 @@ def start_repl():
         console.print("[error]Missing required configuration:[/error]")
         for item in missing:
             console.print(f"  - {item}")
-        console.print("\n[info]Please add these to your .env file.[/info]")
-        console.print("Run 'baymax --setup' for help.")
+        console.print("\n[info]Run 'baymax --setup' for help.[/info]")
         raise typer.Exit(1)
-
-    # Initialize Anthropic client
-    try:
-        client = get_anthropic_client()
-    except Exception as e:
-        console.print(f"[error]Failed to initialize Anthropic client: {e}[/error]")
-        raise typer.Exit(1)
-
-    # Load Composio tools
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        progress.add_task("Loading tools...", total=None)
-        tools = tool_loader.load_tools()
-
-    if not tools:
-        console.print("[warning]No tools loaded. Some features may not work.[/warning]")
-        console.print("[info]Run 'baymax --setup' to connect your accounts.[/info]")
 
     # Interactive REPL mode
     display_welcome()
-    chat_history: List[Dict[str, Any]] = []
+    session_id: Optional[str] = None
 
     while True:
         try:
@@ -786,18 +493,29 @@ def start_repl():
                 display_welcome()
                 continue
 
-            # Process the command
-            response = process_command(user_input, client, tools, chat_history)
+            # Check for new session command
+            if user_input.lower() in ("new", "reset", "clear"):
+                session_id = None
+                console.print("[info]Started a new conversation session.[/info]")
+                continue
+
+            # Process the command with spinner
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("Thinking...", total=None)
+                response, session_id = process_command(
+                    user_input,
+                    continue_conversation=True,
+                    session_id=session_id,
+                )
 
             # Display response
             console.print(f"\n[baymax]Baymax:[/baymax]")
             display_response(response)
-
-            # Update chat history (keep last 10 exchanges = 20 messages)
-            chat_history.append({"role": "user", "content": user_input})
-            chat_history.append({"role": "assistant", "content": response})
-            if len(chat_history) > 20:
-                chat_history = chat_history[-20:]
 
         except KeyboardInterrupt:
             console.print("\n\n[baymax]Baymax:[/baymax] Goodbye! Take care of yourself.")
@@ -823,99 +541,89 @@ def run_command(
         console.print("[error]Missing required configuration:[/error]")
         for item in missing:
             console.print(f"  - {item}")
-        console.print("\n[info]Please add these to your .env file.[/info]")
-        console.print("Run 'baymax --setup' for help.")
+        console.print("\n[info]Run 'baymax --setup' for help.[/info]")
         raise typer.Exit(1)
 
-    # Initialize client and tools
-    try:
-        client = get_anthropic_client()
-        tools = tool_loader.load_tools()
-    except Exception as e:
-        console.print(f"[error]Failed to initialize: {e}[/error]")
-        raise typer.Exit(1)
+    # Process the command with spinner
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Thinking...", total=None)
+        response, _ = process_command(command)
 
-    # Process the command
-    response = process_command(command, client, tools)
     display_response(response)
 
 
-@app.command("apps")
-def list_apps():
-    """List all supported Composio apps."""
-    console.print("\n[info]Supported Composio Apps:[/info]\n")
-    for app in Config.COMPOSIO_APPS:
-        console.print(f"  - {app}")
-    console.print("\n[info]Connect apps at: https://app.composio.dev/apps[/info]")
+@app.command("tools")
+def list_tools():
+    """List all available tools."""
+    console.print("\n[info]Available Tools:[/info]\n")
+
+    tool_descriptions = {
+        "Read": "Read any file in the working directory",
+        "Write": "Create new files",
+        "Edit": "Make precise edits to existing files",
+        "Bash": "Run terminal commands, scripts, git operations",
+        "Glob": "Find files by pattern (e.g., **/*.py)",
+        "Grep": "Search file contents with regex",
+        "WebSearch": "Search the web for information",
+        "WebFetch": "Fetch and parse web page content",
+        "Task": "Spawn specialized subagents for complex tasks",
+    }
+
+    for tool in Config.ALLOWED_TOOLS:
+        desc = tool_descriptions.get(tool, "")
+        console.print(f"  [success]{tool}[/success]: {desc}")
 
 
 @app.command("status")
 def status():
-    """Check Baymax configuration and connection status."""
+    """Check Baymax configuration and status."""
     console.print(Panel("[baymax]Baymax Status[/baymax]", border_style="magenta"))
 
     # Check config
     valid, missing = Config.validate()
 
     console.print("\n[info]Configuration:[/info]")
+
+    # Check Claude Code CLI
+    import shutil
+
+    cli_installed = shutil.which("claude") is not None
     console.print(
-        f"  COMPOSIO_API_KEY: {'[success]Set[/success]' if Config.COMPOSIO_API_KEY else '[error]Missing[/error]'}"
+        f"  Claude Code CLI: {'[success]Installed[/success]' if cli_installed else '[error]Not Found[/error]'}"
     )
-    if Config.USE_FOUNDRY:
-        console.print("  Mode: [info]Azure AI Foundry[/info]")
-        console.print(
-            f"  ANTHROPIC_FOUNDRY_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_FOUNDRY_API_KEY else '[error]Missing[/error]'}"
-        )
-        console.print(
-            f"  ANTHROPIC_FOUNDRY_RESOURCE: {'[success]' + Config.ANTHROPIC_FOUNDRY_RESOURCE + '[/success]' if Config.ANTHROPIC_FOUNDRY_RESOURCE else '[error]Missing[/error]'}"
-        )
+
+    # Check API key / Foundry
+    use_foundry = os.getenv("CLAUDE_CODE_USE_FOUNDRY", "0") == "1"
+    has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+
+    if use_foundry:
+        console.print("  Auth Mode: [info]Azure AI Foundry[/info]")
+    elif has_api_key:
+        console.print("  Auth Mode: [success]ANTHROPIC_API_KEY[/success]")
     else:
-        console.print("  Mode: [info]Direct Anthropic API[/info]")
-        console.print(
-            f"  ANTHROPIC_API_KEY: {'[success]Set[/success]' if Config.ANTHROPIC_API_KEY else '[error]Missing[/error]'}"
-        )
+        console.print("  Auth Mode: [error]Not Configured[/error]")
+
     console.print(f"  Model: {Config.MODEL_NAME}")
+    console.print(f"  Built-in Tools: {len(Config.ALLOWED_TOOLS)} available")
 
-    if valid:
-        console.print("\n[success]All required configuration is present![/success]")
-    else:
-        console.print("\n[error]Missing required configuration. Run 'baymax --setup'.[/error]")
-
-    # Check Composio connections
+    # Composio status
+    console.print("\n[info]External Services (Composio):[/info]")
     if Config.COMPOSIO_API_KEY:
-        try:
-            from composio import Composio
+        console.print("  Status: [success]Enabled[/success]")
+        console.print(f"  Apps: {', '.join(Config.COMPOSIO_APPS)}")
+    else:
+        console.print("  Status: [warning]Not Configured[/warning]")
+        console.print("  Run 'baymax --setup' to learn how to enable external services")
 
-            client = Composio(api_key=Config.COMPOSIO_API_KEY)
-
-            # Fetch all pages of connected accounts
-            all_items = []
-            response = client.connected_accounts.list()
-            all_items.extend(getattr(response, "items", []) or [])
-
-            while getattr(response, "next_cursor", None):
-                response = client.connected_accounts.list(cursor=response.next_cursor)
-                all_items.extend(getattr(response, "items", []) or [])
-
-            # Filter to only ACTIVE connections and get unique toolkits
-            active_toolkits = set()
-            for conn in all_items:
-                status_val = getattr(conn, "status", None)
-                if status_val == "ACTIVE":
-                    toolkit = getattr(conn, "toolkit", None)
-                    if toolkit:
-                        slug = getattr(toolkit, "slug", None) or str(toolkit)
-                        active_toolkits.add(slug)
-
-            console.print("\n[info]Connected Apps:[/info]")
-            if active_toolkits:
-                for toolkit in sorted(active_toolkits):
-                    console.print(f"  [success]v[/success] {toolkit}")
-            else:
-                console.print("  [warning]No apps connected[/warning]")
-
-        except Exception as e:
-            console.print(f"\n[warning]Could not check connections: {e}[/warning]")
+    if valid and cli_installed:
+        console.print("\n[success]Baymax is ready![/success]")
+    else:
+        console.print("\n[error]Baymax is not fully configured. Run 'baymax --setup'.[/error]")
 
 
 # =============================================================================
